@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SDN Data Controller - Mininet Linux Server Edition</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        .topo-canvas-container {
+            background: #0b1329;
+            border-radius: 12px;
+            border: 1px solid #1e293b;
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+            height: 540px;
+        }
+        canvas#topoCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .flow-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+        }
+        .badge-drop { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
+        .badge-allow { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+        .badge-meter { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+        .copilot-chat-box {
+            display: flex;
+            flex-direction: column;
+            height: 480px;
+            background: #0f172a;
+            border-radius: 12px;
+            border: 1px solid #1e293b;
+            padding: 16px;
+        }
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .msg {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 10px;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+        .msg-user {
+            align-self: flex-end;
+            background: #2563eb;
+            color: #fff;
+        }
+        .msg-bot {
+            align-self: flex-start;
+            background: #1e293b;
+            color: #e2e8f0;
+            border: 1px solid #334155;
+        }
+        .mininet-badge {
+            background: #059669;
+            color: #fff;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+    </style>
+</head>
+<body class="dark-theme">
+    <!-- TOP NAVIGATION -->
+    <header class="app-header">
+        <div class="header-brand">
+            <div class="brand-logo">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="6" cy="6" r="3"></circle>
+                    <circle cx="18" cy="6" r="3"></circle>
+                    <circle cx="12" cy="18" r="3"></circle>
+                    <line x1="6" y1="9" x2="12" y2="15"></line>
+                    <line x1="18" y1="9" x2="12" y2="15"></line>
+                    <line x1="9" y1="6" x2="15" y2="6"></line>
+                </svg>
+            </div>
+            <div class="brand-text">
+                <h1>SDN DATA CONTROLLER</h1>
+                <span class="mininet-badge">Mininet & Ryu OpenFlow 1.3</span>
+            </div>
+        </div>
+
+        <!-- STATS BAR -->
+        <div class="header-stats">
+            <div class="stat-pill">
+                <span class="status-indicator online" id="ind-controller"></span>
+                <span class="stat-label">Hạ tầng:</span>
+                <strong id="val-controller-mode">Mininet Server</strong>
+            </div>
+            <div class="stat-pill">
+                <span class="stat-label">OVS Switches:</span>
+                <strong id="val-switch-count">3</strong>
+            </div>
+            <div class="stat-pill">
+                <span class="stat-label">Hosts & Servers:</span>
+                <strong id="val-host-count">4</strong>
+            </div>
+            <div class="stat-pill">
+                <span class="stat-label">Active Rules:</span>
+                <strong id="val-rule-count" style="color: #38bdf8;">1</strong>
+            </div>
+        </div>
+
+        <div class="header-actions">
+            <a href="/docs" target="_blank" class="btn btn-secondary btn-sm">
+                <span>Swagger REST API</span>
+            </a>
+        </div>
+    </header>
+
+    <!-- MAIN APP LAYOUT -->
+    <div class="app-layout">
+        <!-- SIDEBAR -->
+        <aside class="sidebar">
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-tab="tab-topology">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="5" r="3"></circle>
+                        <circle cx="5" cy="19" r="3"></circle>
+                        <circle cx="19" cy="19" r="3"></circle>
+                        <line x1="12" y1="8" x2="5" y2="16"></line>
+                        <line x1="12" y1="8" x2="19" y2="16"></line>
+                    </svg>
+                    <span>Sơ Đồ Mininet</span>
+                </button>
+
+                <button class="nav-item" data-tab="tab-firewall">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                    </svg>
+                    <span>Tường Lửa (ACL & Drop)</span>
+                </button>
+
+                <button class="nav-item" data-tab="tab-qos">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>
+                    </svg>
+                    <span>QoS & Meter Tables</span>
+                </button>
+
+                <button class="nav-item" data-tab="tab-flows">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="8" y1="6" x2="21" y2="6"></line>
+                        <line x1="8" y1="12" x2="21" y2="12"></line>
+                        <line x1="8" y1="18" x2="21" y2="18"></line>
+                        <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                        <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                        <line x1="3" y1="18" x2="3.01" y2="18"></line>
+                    </svg>
+                    <span>Bảng Luồng (Flow Tables)</span>
+                </button>
+
+                <button class="nav-item" data-tab="tab-copilot">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <path d="M8 14s1.5 2 4 2 4-2 4-2"></path>
+                        <line x1="9" y1="9" x2="9.01" y2="9"></line>
+                        <line x1="15" y1="9" x2="15.01" y2="9"></line>
+                    </svg>
+                    <span>AI SDN Copilot</span>
+                </button>
+            </nav>
+        </aside>
+
+        <!-- CONTENT AREA -->
+        <main class="main-content">
+            <!-- TAB 1: TOPOLOGY -->
+            <section id="tab-topology" class="tab-pane active">
+                <div class="pane-header">
+                    <div>
+                        <h2>Sơ Đồ Mạng Ảo Hóa Mininet (Spine/Leaf Mesh)</h2>
+                        <p class="text-muted">3 Switch OVS (s1, s2, s3) và 4 Host chạy trong Linux Network Namespaces</p>
+                    </div>
+                    <div>
+                        <button class="btn btn-primary btn-sm" onclick="fetchTopology()">
+                            <span>Làm Mới Sơ Đồ</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="topo-canvas-container">
+                    <canvas id="topoCanvas"></canvas>
+                </div>
+            </section>
+
+            <!-- TAB 2: FIREWALL -->
+            <section id="tab-firewall" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2>Kiểm Soát Lưu Lượng & Tường Lửa SDN</h2>
+                        <p class="text-muted">Đẩy quy tắc OpenFlow Flow-Mod (DROP / ALLOW) xuống các Switch Mininet</p>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-bottom: 24px; padding: 20px;">
+                    <h3 style="margin-top:0;">Thêm Quy Tắc Tường Lửa Mới</h3>
+                    <form id="form-firewall" onsubmit="handleCreateFirewallRule(event)" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) 120px; gap: 12px; align-items: end;">
+                        <div>
+                            <label>OVS Switch:</label>
+                            <select id="fw-dpid" class="form-control">
+                                <option value="1">s1 (Core Switch)</option>
+                                <option value="2">s2 (Distribution)</option>
+                                <option value="3">s3 (Server Farm)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>IP Nguồn (Src IP):</label>
+                            <input type="text" id="fw-src-ip" class="form-control" placeholder="10.0.0.2">
+                        </div>
+                        <div>
+                            <label>IP Đích (Dst IP):</label>
+                            <input type="text" id="fw-dst-ip" class="form-control" placeholder="10.0.0.4">
+                        </div>
+                        <div>
+                            <label>Giao thức:</label>
+                            <select id="fw-proto" class="form-control">
+                                <option value="ANY">Tất cả (IP)</option>
+                                <option value="TCP">TCP</option>
+                                <option value="UDP">UDP</option>
+                                <option value="ICMP">ICMP (Ping)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>Port Đích:</label>
+                            <input type="number" id="fw-port" class="form-control" placeholder="445">
+                        </div>
+                        <div>
+                            <label>Hành Động:</label>
+                            <select id="fw-action" class="form-control">
+                                <option value="DROP">DROP (Chặn gói)</option>
+                                <option value="ALLOW">ALLOW (Cho qua)</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="btn btn-primary" style="height: 42px;">Áp Dụng</button>
+                    </form>
+                </div>
+
+                <div class="card">
+                    <table class="table" id="fw-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Switch</th>
+                                <th>IP Nguồn</th>
+                                <th>IP Đích</th>
+                                <th>Giao thức</th>
+                                <th>Port</th>
+                                <th>Hành động</th>
+                                <th>Mô tả</th>
+                                <th>Thao tác</th>
+                            </tr>
+                        </thead>
+                        <tbody id="fw-table-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB 3: QOS -->
+            <section id="tab-qos" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2>Chất Lượng Dịch Vụ (QoS Meter Table)</h2>
+                        <p class="text-muted">Cấu hình OpenFlow 1.3 Meter Bands để giới hạn băng thông các cổng Switch Mininet</p>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-bottom: 24px; padding: 20px;">
+                    <h3 style="margin-top:0;">Tạo Băng Thông Giới Hạn (Meter Band)</h3>
+                    <form id="form-qos" onsubmit="handleCreateQoSMeter(event)" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)) 120px; gap: 12px; align-items: end;">
+                        <div>
+                            <label>OVS Switch:</label>
+                            <select id="qos-dpid" class="form-control">
+                                <option value="1">s1 (Core Switch)</option>
+                                <option value="2">s2 (Distribution)</option>
+                                <option value="3">s3 (Server Farm)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>Đối tượng áp dụng:</label>
+                            <input type="text" id="qos-target" class="form-control" placeholder="Host h2 (10.0.0.2)">
+                        </div>
+                        <div>
+                            <label>Băng thông tối đa (Kbps):</label>
+                            <input type="number" id="qos-rate" class="form-control" placeholder="1000" value="1000">
+                        </div>
+                        <button type="submit" class="btn btn-primary" style="height: 42px;">Kích Hoạt</button>
+                    </form>
+                </div>
+
+                <div class="card">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Meter ID</th>
+                                <th>Switch</th>
+                                <th>Tốc độ (Kbps)</th>
+                                <th>Đối tượng</th>
+                                <th>Thời gian tạo</th>
+                                <th>Thao tác</th>
+                            </tr>
+                        </thead>
+                        <tbody id="qos-table-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB 4: FLOW TABLES -->
+            <section id="tab-flows" class="tab-pane">
+                <div class="pane-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                    <div>
+                        <h2>Chi Tiết Bảng Luồng (OpenFlow 1.3 Flow Entries)</h2>
+                        <p class="text-muted">Dữ liệu Flow Table thực tế được đọc trực tiếp từ phần cứng Switch Mininet</p>
+                    </div>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <label style="font-size: 0.85rem; color: #94a3b8; font-weight: 500;">Chọn Switch:</label>
+                        <select id="flow-switch-select" class="form-control" onchange="fetchFlows()" style="width: auto; padding: 6px 12px; font-size: 0.85rem;">
+                            <option value="all" selected>Tất cả Switch (s1, s2, s3)</option>
+                            <option value="1">Switch s1 (Core)</option>
+                            <option value="2">Switch s2 (Distribution)</option>
+                            <option value="3">Switch s3 (Server Farm)</option>
+                        </select>
+                        <button class="btn btn-secondary btn-sm" onclick="fetchFlows()" style="display: flex; align-items: center; gap: 4px;">
+                            🔄 Làm Mới
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Hộp giải thích trực quan chuẩn SDN cho sinh viên -->
+                <div style="background: rgba(30, 58, 138, 0.2); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; line-height: 1.6; color: #cbd5e1;">
+                    💡 <strong>Hiểu đúng về bảng Flow Table OpenFlow 1.3:</strong><br>
+                    • <strong>Priority 0, Match {} (Table-Miss)</strong>: Là luật nền tảng mặc định. Khi chưa có gói tin qua lại, Switch chỉ lưu duy nhất luật này để chuyển tiếp mọi gói lạ lên Ryu Controller qua cổng 6653.<br>
+                    • <strong>Priority 10 (L2 Learning)</strong>: Được Controller nạp xuống khi bạn chạy <code>pingall</code> hoặc truyền file. Các dòng này có <code>idle_timeout = 60s</code> (tự biến mất sau 60 giây không có lưu lượng để giải phóng bộ nhớ TCAM).<br>
+                    • <strong>Priority 1000 (Firewall Rules)</strong>: Luật chặn hoặc cho phép của bạn, luôn ưu tiên cao nhất đè lên các luật chuyển tiếp!
+                </div>
+
+                <div class="card">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Switch</th>
+                                <th>Table ID</th>
+                                <th>Độ Ưu Tiên</th>
+                                <th>Điều Kiện Lọc (Match Fields)</th>
+                                <th>Hành Động (Action)</th>
+                                <th>Số Gói (Packets)</th>
+                                <th>Dung Lượng</th>
+                            </tr>
+                        </thead>
+                        <tbody id="flows-table-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB 5: AI COPILOT -->
+            <section id="tab-copilot" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2>Trợ Lý AI Điều Khiển Mạng Mininet (Intent-Based Copilot)</h2>
+                        <p class="text-muted">Gõ yêu cầu bằng tiếng Việt để AI tự động tạo quy tắc OpenFlow đẩy xuống Mininet</p>
+                    </div>
+                </div>
+
+                <div class="copilot-chat-box">
+                    <div class="chat-messages" id="chat-messages">
+                        <div class="msg msg-bot">
+                            Xin chào! Tôi là AI SDN Copilot điều khiển mạng ảo hóa Mininet. <br>
+                            <em>Tôi có thể tự động bóc tách IP, Switch, Port và sinh Flow-Mod OpenFlow 1.3 cho Mininet. Bấm các gợi ý bên dưới hoặc gõ tự nhiên:</em>
+                        </div>
+                    </div>
+                    
+                    <!-- Gợi ý nhanh 1-Click -->
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="quickSendAI('Chặn h2 gửi file SMB cổng 445 sang Server h4')" style="font-size: 0.78rem; background: #1e293b; border-color: #334155;">
+                            🛡️ Chặn h2 gửi file SMB 445 sang h4
+                        </button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="quickSendAI('Chặn máy h1 truy cập Web Server h3')" style="font-size: 0.78rem; background: #1e293b; border-color: #334155;">
+                            🚫 Chặn h1 truy cập Web h3
+                        </button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="quickSendAI('Giới hạn băng thông máy h2 1000kbps')" style="font-size: 0.78rem; background: #1e293b; border-color: #334155;">
+                            ⚡ Bóp băng thông h2 1000 Kbps
+                        </button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="quickSendAI('Cấm máy h2 ping sang h4')" style="font-size: 0.78rem; background: #1e293b; border-color: #334155;">
+                            🔕 Cấm h2 ping sang h4
+                        </button>
+                    </div>
+
+                    <form onsubmit="handleAIChat(event)" style="display: flex; gap: 10px;">
+                        <input type="text" id="ai-input" class="form-control" placeholder="Nhập yêu cầu: 'Chặn h2 sang h4', 'Bóp băng thông h1 500kbps'..." style="flex:1;">
+                        <button type="submit" class="btn btn-primary">Gửi Ý Định</button>
+                    </form>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

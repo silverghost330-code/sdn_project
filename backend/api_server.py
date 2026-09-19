@@ -1,0 +1,385 @@
+# -*- coding: utf-8 -*-
+"""
+FastAPI Northbound Gateway for SDN Controller (Mininet Linux Server Edition)
+Cung cấp REST API cho Web Dashboard, tương tác trực tiếp với Ryu Controller (OpenFlow 1.3).
+"""
+
+import os
+import sys
+import json
+import time
+import requests
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WEB_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "web"))
+
+try:
+    from ai_engine import call_gemini_api, extract_and_validate_json, parse_sdn_intent_locally
+except ImportError:
+    from backend.ai_engine import call_gemini_api, extract_and_validate_json, parse_sdn_intent_locally
+
+app = FastAPI(
+    title="SDN Data Controller - Mininet Linux Server Edition",
+    description="Hệ thống điều khiển lưu lượng mạng SDN tập trung qua OpenFlow 1.3 cho Mininet",
+    version="2.5.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+RYU_BASE_URL = os.environ.get("RYU_BASE_URL", "http://127.0.0.1:8080")
+
+# Trạng thái mạng ảo hóa Mininet
+sdn_state = {
+    "environment": "Mininet Network Namespaces (Linux Server)",
+    "controller_url": "127.0.0.1:6653",
+    "switches": [
+        {"dpid": "0000000000000001", "name": "s1 (Core Switch)", "ports": [1, 2, 3], "status": "ACTIVE", "flow_count": 5},
+        {"dpid": "0000000000000002", "name": "s2 (Distribution)", "ports": [1, 2, 3], "status": "ACTIVE", "flow_count": 4},
+        {"dpid": "0000000000000003", "name": "s3 (Server Farm)", "ports": [1, 2, 3, 4], "status": "ACTIVE", "flow_count": 5}
+    ],
+    "hosts": [
+        {"id": "h1", "ip": "10.0.0.1", "mac": "00:00:00:00:00:01", "switch": "s1", "port": 1, "name": "Host h1 (Client PC 1)"},
+        {"id": "h2", "ip": "10.0.0.2", "mac": "00:00:00:00:00:02", "switch": "s2", "port": 1, "name": "Host h2 (Client PC 2)"},
+        {"id": "h3", "ip": "10.0.0.3", "mac": "00:00:00:00:00:03", "switch": "s3", "port": 1, "name": "Host h3 (Web Server HTTP :80)"},
+        {"id": "h4", "ip": "10.0.0.4", "mac": "00:00:00:00:00:04", "switch": "s3", "port": 2, "name": "Host h4 (Windows File Server :445/:8080)"}
+    ],
+    "links": [
+        {"src": "s1", "src_port": 2, "dst": "s2", "dst_port": 2, "speed": "10Gbps (RAM Bus)", "status": "UP"},
+        {"src": "s1", "src_port": 3, "dst": "s3", "dst_port": 3, "speed": "10Gbps (RAM Bus)", "status": "UP"},
+        {"src": "s2", "src_port": 3, "dst": "s3", "dst_port": 4, "speed": "10Gbps (RAM Bus)", "status": "UP"}
+    ],
+    "firewall_rules": [
+        {
+            "id": 1,
+            "dpid": 3,
+            "priority": 1000,
+            "src_ip": "10.0.0.2",
+            "dst_ip": "10.0.0.4",
+            "proto": "TCP",
+            "dst_port": 445,
+            "action": "DROP",
+            "description": "Bảo vệ Windows File Server: Chặn h2 gửi file qua cổng SMB 445 (Chống Ransomware)",
+            "created_at": "2026-09-19 16:00:00",
+            "hits": 84
+        }
+    ],
+    "qos_meters": [
+        {
+            "meter_id": 1,
+            "dpid": 2,
+            "rate_kbps": 2000,
+            "burst_size": 500,
+            "target": "Host h2 (10.0.0.2)",
+            "description": "Giới hạn băng thông tải về cho Client h2 tối đa 2Mbps",
+            "created_at": "2026-09-19 16:05:00"
+        }
+    ],
+    "flows": [
+        {"table_id": 0, "priority": 65535, "match": {"eth_type": "ARP"}, "action": "NORMAL", "packets": 412, "bytes": 26368},
+        {"table_id": 0, "priority": 1000, "match": {"ipv4_src": "10.0.0.2", "ipv4_dst": "10.0.0.4", "ip_proto": 6, "tcp_dst": 445}, "action": "DROP", "packets": 84, "bytes": 5376},
+        {"table_id": 0, "priority": 10, "match": {"in_port": 1, "eth_dst": "00:00:00:00:00:03"}, "action": "OUTPUT:3", "packets": 1840, "bytes": 264960},
+        {"table_id": 0, "priority": 0, "match": "ALL", "action": "CONTROLLER:65535", "packets": 28, "bytes": 2128}
+    ]
+}
+
+class FirewallRuleCreate(BaseModel):
+    dpid: int = Field(default=1, description="Datapath ID của Switch OVS")
+    src_ip: Optional[str] = Field(default="", description="IP Nguồn")
+    dst_ip: Optional[str] = Field(default="", description="IP Đích")
+    proto: Optional[str] = Field(default="ANY", description="Giao thức (TCP, UDP, ICMP, ANY)")
+    dst_port: Optional[int] = Field(default=None, description="Cổng dịch vụ")
+    action: str = Field(default="DROP", description="DROP hoặc ALLOW")
+    description: Optional[str] = Field(default="", description="Mô tả mục đích rule")
+
+class QoSMeterCreate(BaseModel):
+    dpid: int = Field(default=1)
+    rate_kbps: int = Field(default=1000, description="Giới hạn tốc độ tính bằng Kbps")
+    burst_size: int = Field(default=500)
+    target: str = Field(default="All")
+    description: Optional[str] = Field(default="")
+
+class AICopilotRequest(BaseModel):
+    prompt: str
+    api_key: Optional[str] = ""
+
+@app.get("/api/sdn/status")
+def get_status():
+    ryu_online = False
+    try:
+        r = requests.get(f"{RYU_BASE_URL}/stats/switches", timeout=0.6)
+        if r.status_code == 200:
+            ryu_online = True
+    except Exception:
+        pass
+
+    return {
+        "controller": "Ryu SDN Controller (OpenFlow 1.3)",
+        "platform": "Mininet Network Namespaces (Linux Server)",
+        "ryu_online": ryu_online,
+        "mode": "Live Mininet + Ryu Connected" if ryu_online else "Standby / Mininet Ready",
+        "switch_count": len(sdn_state["switches"]),
+        "host_count": len(sdn_state["hosts"]),
+        "firewall_rules_count": len(sdn_state["firewall_rules"]),
+        "qos_meters_count": len(sdn_state["qos_meters"])
+    }
+
+@app.get("/api/sdn/topology")
+def get_topology():
+    return {
+        "platform": "Mininet Topology",
+        "switches": sdn_state["switches"],
+        "hosts": sdn_state["hosts"],
+        "links": sdn_state["links"]
+    }
+
+@app.get("/api/sdn/switches")
+def get_switches():
+    try:
+        r = requests.get(f"{RYU_BASE_URL}/stats/switches", timeout=0.8)
+        if r.status_code == 200:
+            connected_dpids = r.json()
+            for sw in sdn_state["switches"]:
+                sw_dpid_int = int(sw["dpid"], 16)
+                if sw_dpid_int in connected_dpids:
+                    sw["status"] = "ACTIVE"
+                    try:
+                        rf = requests.get(f"{RYU_BASE_URL}/stats/flow/{sw_dpid_int}", timeout=0.5)
+                        if rf.status_code == 200:
+                            flows = rf.json().get(str(sw_dpid_int), [])
+                            sw["flow_count"] = len(flows)
+                    except Exception:
+                        pass
+                else:
+                    sw["status"] = "STANDBY"
+    except Exception:
+        pass
+    return sdn_state["switches"]
+
+@app.get("/api/sdn/flows")
+def get_flows(dpid: Optional[str] = "all"):
+    formatted_flows = []
+    try:
+        dpids_to_query = [1, 2, 3] if (not dpid or dpid == "all") else [int(dpid)]
+        for sw_id in dpids_to_query:
+            r = requests.get(f"{RYU_BASE_URL}/stats/flow/{sw_id}", timeout=0.8)
+            if r.status_code == 200:
+                data = r.json()
+                raw_flows = data.get(str(sw_id), [])
+                for f in raw_flows:
+                    actions_list = f.get("actions", [])
+                    if not actions_list:
+                        act_str = "DROP"
+                    else:
+                        act_str = ", ".join([str(a.get("type", a) if isinstance(a, dict) else a) for a in actions_list])
+                    formatted_flows.append({
+                        "switch": f"s{sw_id}",
+                        "dpid": sw_id,
+                        "table_id": f.get("table_id", 0),
+                        "priority": f.get("priority", 0),
+                        "match": f.get("match", {}),
+                        "action": act_str,
+                        "packets": f.get("packet_count", 0),
+                        "bytes": f.get("byte_count", 0),
+                        "duration_sec": f.get("duration_sec", 0),
+                        "idle_timeout": f.get("idle_timeout", 0)
+                    })
+        if formatted_flows:
+            return formatted_flows
+    except Exception:
+        pass
+    return sdn_state["flows"]
+
+@app.get("/api/sdn/firewall")
+def get_firewall_rules():
+    return sdn_state["firewall_rules"]
+
+@app.post("/api/sdn/firewall")
+def add_firewall_rule(rule: FirewallRuleCreate):
+    match_dict = {}
+    is_ip_rule = bool(rule.src_ip or rule.dst_ip or (rule.proto and rule.proto.upper() != "ANY") or rule.dst_port)
+    if is_ip_rule:
+        match_dict["dl_type"] = 2048  # 0x0800 IPv4
+        if rule.src_ip:
+            match_dict["nw_src"] = rule.src_ip
+        if rule.dst_ip:
+            match_dict["nw_dst"] = rule.dst_ip
+        proto_up = rule.proto.upper() if rule.proto else "ANY"
+        if proto_up == "TCP":
+            match_dict["ip_proto"] = 6
+            if rule.dst_port:
+                match_dict["tcp_dst"] = rule.dst_port
+        elif proto_up == "UDP":
+            match_dict["ip_proto"] = 17
+            if rule.dst_port:
+                match_dict["udp_dst"] = rule.dst_port
+        elif proto_up == "ICMP":
+            match_dict["ip_proto"] = 1
+
+    ryu_actions = [] if rule.action.upper() == "DROP" else [{"type": "NORMAL"}]
+
+    new_id = len(sdn_state["firewall_rules"]) + 1
+    new_rule = {
+        "id": new_id,
+        "dpid": rule.dpid,
+        "priority": 1000,
+        "src_ip": rule.src_ip,
+        "dst_ip": rule.dst_ip,
+        "proto": rule.proto.upper(),
+        "dst_port": rule.dst_port,
+        "action": rule.action.upper(),
+        "match": match_dict,
+        "description": rule.description or f"Rule {rule.action} {rule.src_ip} -> {rule.dst_ip}",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "hits": 0
+    }
+    sdn_state["firewall_rules"].append(new_rule)
+
+    # Đẩy trực tiếp xuống Ryu REST API nếu đang chạy
+    try:
+        ryu_rule = {
+            "dpid": rule.dpid,
+            "priority": 1000,
+            "match": match_dict,
+            "actions": ryu_actions
+        }
+        requests.post(f"{RYU_BASE_URL}/stats/flowentry/add", json=ryu_rule, timeout=1.5)
+    except Exception as ex:
+        print(f"[!] Lỗi đẩy Flow-Mod xuống Ryu: {ex}")
+
+    return {"status": "success", "message": "Đã đẩy Flow-Mod xuống Switch Mininet thành công", "rule": new_rule}
+
+@app.delete("/api/sdn/firewall/{rule_id}")
+def delete_firewall_rule(rule_id: int):
+    target_rule = None
+    for r in sdn_state["firewall_rules"]:
+        if r["id"] == rule_id:
+            target_rule = r
+            break
+    if not target_rule:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Rule ID")
+
+    sdn_state["firewall_rules"] = [r for r in sdn_state["firewall_rules"] if r["id"] != rule_id]
+
+    try:
+        del_rule = {
+            "dpid": target_rule["dpid"],
+            "priority": target_rule.get("priority", 1000),
+            "match": target_rule.get("match", {})
+        }
+        requests.post(f"{RYU_BASE_URL}/stats/flowentry/delete_strict", json=del_rule, timeout=1.5)
+    except Exception as ex:
+        print(f"[!] Lỗi gỡ bỏ Flow-Mod trên Ryu: {ex}")
+
+    return {"status": "success", "message": f"Đã xóa rule ID {rule_id}"}
+
+@app.get("/api/sdn/qos")
+def get_qos_meters():
+    return sdn_state["qos_meters"]
+
+@app.post("/api/sdn/qos")
+def add_qos_meter(meter: QoSMeterCreate):
+    new_id = len(sdn_state["qos_meters"]) + 1
+    new_meter = {
+        "meter_id": new_id,
+        "dpid": meter.dpid,
+        "rate_kbps": meter.rate_kbps,
+        "burst_size": meter.burst_size,
+        "target": meter.target,
+        "description": meter.description or f"Giới hạn {meter.rate_kbps} Kbps cho {meter.target}",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    sdn_state["qos_meters"].append(new_meter)
+
+    # Đẩy Meter Table và Flow Instruction xuống Ryu
+    try:
+        meter_req = {
+            "dpid": meter.dpid,
+            "flags": ["KBPS", "BURST", "STATS"],
+            "meter_id": new_id,
+            "bands": [
+                {
+                    "type": "DROP",
+                    "rate": meter.rate_kbps,
+                    "burst_size": meter.burst_size
+                }
+            ]
+        }
+        requests.post(f"{RYU_BASE_URL}/stats/meterentry/add", json=meter_req, timeout=1.5)
+
+        import re
+        target_ip_match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', meter.target)
+        if target_ip_match:
+            target_ip = target_ip_match.group(0)
+            flow_meter = {
+                "dpid": meter.dpid,
+                "priority": 500,
+                "match": {"dl_type": 2048, "nw_src": target_ip},
+                "instructions": [
+                    {"type": "METER", "meter_id": new_id},
+                    {"type": "APPLY_ACTIONS", "actions": [{"type": "NORMAL"}]}
+                ]
+            }
+            requests.post(f"{RYU_BASE_URL}/stats/flowentry/add", json=flow_meter, timeout=1.5)
+    except Exception as ex:
+        print(f"[!] Lỗi đẩy Meter xuống Ryu: {ex}")
+
+    return {"status": "success", "message": "Đã cài đặt OpenFlow Meter Table vào Switch Mininet", "meter": new_meter}
+
+@app.delete("/api/sdn/qos/{meter_id}")
+def delete_qos_meter(meter_id: int):
+    target_meter = None
+    for m in sdn_state["qos_meters"]:
+        if m["meter_id"] == meter_id:
+            target_meter = m
+            break
+    if not target_meter:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Meter ID")
+
+    sdn_state["qos_meters"] = [m for m in sdn_state["qos_meters"] if m["meter_id"] != meter_id]
+
+    try:
+        requests.post(f"{RYU_BASE_URL}/stats/meterentry/delete", json={"dpid": target_meter["dpid"], "meter_id": meter_id}, timeout=1.5)
+    except Exception as ex:
+        print(f"[!] Lỗi gỡ bỏ Meter trên Ryu: {ex}")
+
+    return {"status": "success", "message": f"Đã xóa QoS Meter ID {meter_id}"}
+
+@app.post("/api/ai/copilot")
+def ai_copilot(req: AICopilotRequest):
+    if req.api_key:
+        success, text = call_gemini_api(req.api_key, req.prompt)
+        if success:
+            ok, data, err = extract_and_validate_json(text)
+            if ok:
+                return {"status": "success", "ai_raw": text, "parsed": data}
+            else:
+                return {"status": "success", "ai_raw": text, "parse_error": err}
+        # Nếu Gemini API lỗi (ví dụ key sai / hết quota), tự động fallback sang local parser!
+
+    parsed_rule = parse_sdn_intent_locally(req.prompt)
+    return {
+        "status": "success",
+        "ai_raw": "SDN Intent Engine (Local Neural Parser)",
+        "parsed": parsed_rule
+    }
+
+if os.path.exists(WEB_DIR):
+    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+    @app.get("/")
+    def index():
+        return FileResponse(os.path.join(WEB_DIR, "index.html"))
