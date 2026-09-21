@@ -288,7 +288,7 @@
 
                 <div class="card" style="margin-bottom: 24px; padding: 20px;">
                     <h3 style="margin-top:0;">Tạo Băng Thông Giới Hạn (Meter Band)</h3>
-                    <form id="form-qos" onsubmit="handleCreateQoSMeter(event)" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)) 120px; gap: 12px; align-items: end;">
+                    <form id="form-qos" onsubmit="handleCreateQoSMeter(event)" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) 120px; gap: 12px; align-items: end;">
                         <div>
                             <label>OVS Switch:</label>
                             <select id="qos-dpid" class="form-control">
@@ -298,11 +298,15 @@
                             </select>
                         </div>
                         <div>
-                            <label>Đối tượng áp dụng:</label>
-                            <input type="text" id="qos-target" class="form-control" placeholder="Host h2 (10.0.0.2)">
+                            <label>IP Nguồn (Src IP):</label>
+                            <input type="text" id="qos-src-ip" class="form-control" placeholder="10.0.0.1 (để trống = *)">
                         </div>
                         <div>
-                            <label>Băng thông tối đa (Kbps):</label>
+                            <label>IP Đích (Dst IP):</label>
+                            <input type="text" id="qos-dst-ip" class="form-control" placeholder="10.0.0.3 (để trống = *)">
+                        </div>
+                        <div>
+                            <label>Băng thông (Kbps):</label>
                             <input type="number" id="qos-rate" class="form-control" placeholder="1000" value="1000">
                         </div>
                         <button type="submit" class="btn btn-primary" style="height: 42px;">Kích Hoạt</button>
@@ -316,7 +320,9 @@
                                 <th>Meter ID</th>
                                 <th>Switch</th>
                                 <th>Tốc độ (Kbps)</th>
-                                <th>Đối tượng</th>
+                                <th>IP Nguồn</th>
+                                <th>IP Đích</th>
+                                <th>Mô tả</th>
                                 <th>Thời gian tạo</th>
                                 <th>Thao tác</th>
                             </tr>

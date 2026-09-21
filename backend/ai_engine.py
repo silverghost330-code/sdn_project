@@ -168,13 +168,24 @@ def parse_sdn_intent_locally(user_prompt: str) -> Dict[str, Any]:
                 if big_nums:
                     rate = big_nums[0]
         
+        has_two_endpoints = len(found_keys) >= 2 or len(re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', user_prompt)) >= 2
+        dst_endpoint = dst_ip if has_two_endpoints else ""
+        target_label = f"{src_ip} ➔ {dst_ip}" if has_two_endpoints else f"Host ({src_ip})"
         target_switch = 2 if src_ip == '10.0.0.2' else (1 if src_ip == '10.0.0.1' else 3)
+        
+        match_dict = {"ipv4_src": src_ip}
+        if dst_endpoint:
+            match_dict["ipv4_dst"] = dst_endpoint
+
         return {
             "intent": "QOS_LIMIT",
             "target_switch": target_switch,
             "rate_kbps": rate,
-            "target": f"Host ({src_ip})",
-            "explanation": f"Hệ thống đã nhận diện ý định QoS: '{user_prompt}'. Giới hạn băng thông cho {src_ip} ở mức {rate} Kbps trên Switch s{target_switch}."
+            "src_ip": src_ip,
+            "dst_ip": dst_endpoint,
+            "match": match_dict,
+            "target": target_label,
+            "explanation": f"Hệ thống đã nhận diện ý định QoS: '{user_prompt}'. Giới hạn băng thông từ {src_ip} đến {dst_endpoint or 'mọi đích'} ở mức {rate} Kbps trên Switch s{target_switch}."
         }
     
     # Mặc định hoặc Drop / Allow

@@ -83,8 +83,10 @@ sdn_state = {
             "dpid": 2,
             "rate_kbps": 2000,
             "burst_size": 500,
-            "target": "Host h2 (10.0.0.2)",
-            "description": "Giới hạn băng thông tải về cho Client h2 tối đa 2Mbps",
+            "src_ip": "10.0.0.2",
+            "dst_ip": "10.0.0.4",
+            "target": "10.0.0.2 ➔ 10.0.0.4",
+            "description": "Giới hạn băng thông truyền file từ Client h2 đến h4 tối đa 2Mbps",
             "created_at": "2026-09-19 16:05:00"
         }
     ],
@@ -106,10 +108,12 @@ class FirewallRuleCreate(BaseModel):
     description: Optional[str] = Field(default="", description="Mô tả mục đích rule")
 
 class QoSMeterCreate(BaseModel):
-    dpid: int = Field(default=1)
+    dpid: int = Field(default=1, description="Datapath ID của Switch OVS")
     rate_kbps: int = Field(default=1000, description="Giới hạn tốc độ tính bằng Kbps")
     burst_size: int = Field(default=500)
-    target: str = Field(default="All")
+    src_ip: Optional[str] = Field(default="", description="IP Nguồn (để trống = Tất cả)")
+    dst_ip: Optional[str] = Field(default="", description="IP Đích (để trống = Tất cả)")
+    target: Optional[str] = Field(default="All", description="Mô tả đối tượng")
     description: Optional[str] = Field(default="")
 
 class AICopilotRequest(BaseModel):
@@ -293,13 +297,29 @@ def get_qos_meters():
 @app.post("/api/sdn/qos")
 def add_qos_meter(meter: QoSMeterCreate):
     new_id = len(sdn_state["qos_meters"]) + 1
+    src = (meter.src_ip or "").strip()
+    dst = (meter.dst_ip or "").strip()
+
+    # Nếu không truyền src_ip/dst_ip nhưng có target dạng regex
+    if not src and not dst and meter.target:
+        import re
+        ips = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', meter.target)
+        if len(ips) >= 2:
+            src, dst = ips[0], ips[1]
+        elif len(ips) == 1:
+            src = ips[0]
+
+    target_display = f"{src or '*'} ➔ {dst or '*'}" if (src or dst) else (meter.target or "Tất cả traffic")
+
     new_meter = {
         "meter_id": new_id,
         "dpid": meter.dpid,
         "rate_kbps": meter.rate_kbps,
         "burst_size": meter.burst_size,
-        "target": meter.target,
-        "description": meter.description or f"Giới hạn {meter.rate_kbps} Kbps cho {meter.target}",
+        "src_ip": src,
+        "dst_ip": dst,
+        "target": target_display,
+        "description": meter.description or f"Giới hạn {meter.rate_kbps} Kbps cho {target_display}",
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     sdn_state["qos_meters"].append(new_meter)
@@ -320,24 +340,27 @@ def add_qos_meter(meter: QoSMeterCreate):
         }
         requests.post(f"{RYU_BASE_URL}/stats/meterentry/add", json=meter_req, timeout=1.5)
 
-        import re
-        target_ip_match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', meter.target)
-        if target_ip_match:
-            target_ip = target_ip_match.group(0)
-            flow_meter = {
-                "dpid": meter.dpid,
-                "priority": 500,
-                "match": {"dl_type": 2048, "nw_src": target_ip},
-                "instructions": [
-                    {"type": "METER", "meter_id": new_id},
-                    {"type": "APPLY_ACTIONS", "actions": [{"type": "NORMAL"}]}
-                ]
-            }
-            requests.post(f"{RYU_BASE_URL}/stats/flowentry/add", json=flow_meter, timeout=1.5)
+        # Xây dựng Flow Match theo IP nguồn và/hoặc IP đích
+        match_fields = {"dl_type": 2048}
+        if src:
+            match_fields["nw_src"] = src
+        if dst:
+            match_fields["nw_dst"] = dst
+
+        flow_meter = {
+            "dpid": meter.dpid,
+            "priority": 500,
+            "match": match_fields,
+            "instructions": [
+                {"type": "METER", "meter_id": new_id},
+                {"type": "APPLY_ACTIONS", "actions": [{"type": "NORMAL"}]}
+            ]
+        }
+        requests.post(f"{RYU_BASE_URL}/stats/flowentry/add", json=flow_meter, timeout=1.5)
     except Exception as ex:
         print(f"[!] Lỗi đẩy Meter xuống Ryu: {ex}")
 
-    return {"status": "success", "message": "Đã cài đặt OpenFlow Meter Table vào Switch Mininet", "meter": new_meter}
+    return {"status": "success", "message": f"Đã cài đặt OpenFlow Meter Table ({target_display} - {meter.rate_kbps} Kbps) vào Switch Mininet", "meter": new_meter}
 
 @app.delete("/api/sdn/qos/{meter_id}")
 def delete_qos_meter(meter_id: int):
@@ -352,6 +375,19 @@ def delete_qos_meter(meter_id: int):
     sdn_state["qos_meters"] = [m for m in sdn_state["qos_meters"] if m["meter_id"] != meter_id]
 
     try:
+        # Xóa Flow Entry bóp băng thông tương ứng trên Ryu
+        del_flow = {
+            "dpid": target_meter["dpid"],
+            "priority": 500,
+            "match": {"dl_type": 2048}
+        }
+        if target_meter.get("src_ip"):
+            del_flow["match"]["nw_src"] = target_meter["src_ip"]
+        if target_meter.get("dst_ip"):
+            del_flow["match"]["nw_dst"] = target_meter["dst_ip"]
+        requests.post(f"{RYU_BASE_URL}/stats/flowentry/delete_strict", json=del_flow, timeout=1.5)
+
+        # Xóa Meter Entry
         requests.post(f"{RYU_BASE_URL}/stats/meterentry/delete", json={"dpid": target_meter["dpid"], "meter_id": meter_id}, timeout=1.5)
     except Exception as ex:
         print(f"[!] Lỗi gỡ bỏ Meter trên Ryu: {ex}")

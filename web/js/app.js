@@ -210,11 +210,15 @@ async function fetchQoSMeters() {
         tbody.innerHTML = '';
         meters.forEach(m => {
             const tr = document.createElement('tr');
+            const srcDisplay = m.src_ip ? `<code>${m.src_ip}</code>` : `<span style="color:#94a3b8;">*</span>`;
+            const dstDisplay = m.dst_ip ? `<code>${m.dst_ip}</code>` : `<span style="color:#94a3b8;">*</span>`;
             tr.innerHTML = `
                 <td>#${m.meter_id}</td>
                 <td>Switch s${m.dpid}</td>
                 <td><span class="flow-badge badge-meter">${m.rate_kbps} Kbps</span></td>
-                <td>${m.target}</td>
+                <td>${srcDisplay}</td>
+                <td>${dstDisplay}</td>
+                <td>${m.description || m.target}</td>
                 <td>${m.created_at}</td>
                 <td><button class="btn btn-secondary btn-sm" onclick="deleteQoSMeter(${m.meter_id})">Xóa</button></td>
             `;
@@ -227,19 +231,33 @@ async function fetchQoSMeters() {
 
 async function handleCreateQoSMeter(e) {
     e.preventDefault();
+    const srcIp = document.getElementById('qos-src-ip').value.trim();
+    const dstIp = document.getElementById('qos-dst-ip').value.trim();
+    const dpid = parseInt(document.getElementById('qos-dpid').value);
+    const rate = parseInt(document.getElementById('qos-rate').value) || 1000;
+
     const payload = {
-        dpid: parseInt(document.getElementById('qos-dpid').value),
-        target: document.getElementById('qos-target').value.trim() || 'All',
-        rate_kbps: parseInt(document.getElementById('qos-rate').value) || 1000
+        dpid: dpid,
+        src_ip: srcIp,
+        dst_ip: dstIp,
+        rate_kbps: rate
     };
-    await fetch('/api/sdn/qos', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    });
-    fetchQoSMeters();
-    fetchStatus();
-    alert('Đã thiết lập QoS Meter Table trên Switch Mininet thành công!');
+    try {
+        const res = await fetch('/api/sdn/qos', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+            fetchQoSMeters();
+            fetchStatus();
+            fetchFlows();
+            const targetLabel = (srcIp || dstIp) ? `${srcIp || '*'} ➔ ${dstIp || '*'}` : 'Tất cả traffic';
+            alert(`Đã thiết lập QoS Meter Table (${targetLabel} - ${rate} Kbps) trên Switch s${dpid} thành công!`);
+        }
+    } catch (err) {
+        alert('Lỗi: ' + err);
+    }
 }
 
 async function deleteQoSMeter(id) {
@@ -433,9 +451,13 @@ async function applyAIFirewallRule(ruleObj) {
 }
 
 async function applyAIQoSMeter(ruleObj) {
+    const srcIp = ruleObj.src_ip || ruleObj.match?.ipv4_src || '';
+    const dstIp = ruleObj.dst_ip || ruleObj.match?.ipv4_dst || '';
     const payload = {
         dpid: ruleObj.target_switch || 2,
-        target: ruleObj.target || 'Host h2 (10.0.0.2)',
+        src_ip: srcIp,
+        dst_ip: dstIp,
+        target: ruleObj.target || (srcIp || dstIp ? `${srcIp || '*'} ➔ ${dstIp || '*'}` : 'Traffic'),
         rate_kbps: ruleObj.rate_kbps || 1000,
         burst_size: 500,
         description: ruleObj.explanation || 'Giới hạn băng thông sinh bởi AI'
@@ -450,7 +472,7 @@ async function applyAIQoSMeter(ruleObj) {
             fetchQoSMeters();
             fetchStatus();
             fetchFlows();
-            alert(`✅ Đã thiết lập giới hạn ${payload.rate_kbps} Kbps cho ${payload.target} trên Switch s${payload.dpid}!`);
+            alert(`✅ Đã thiết lập QoS (${payload.target} - ${payload.rate_kbps} Kbps) trên Switch s${payload.dpid}!`);
         }
     } catch (e) {
         alert('Lỗi áp dụng QoS: ' + e);
