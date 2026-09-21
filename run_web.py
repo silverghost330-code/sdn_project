@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Khởi động SDN Data Controller & Web Dashboard (PNETLab Edition)
+Khởi động SDN Data Controller & Web Dashboard (Mininet Edition)
 Hỗ trợ chạy cục bộ trên Windows hoặc trên Server Cloud (bind 0.0.0.0).
 """
 
@@ -57,17 +57,16 @@ if __name__ == "__main__":
     ensure_port_free(PORT)
 
     print("=" * 68)
-    print(" 🚀 KHỞI ĐỘNG SDN CONTROLLER FOR PNETLAB & VIRTUAL NETWORK ".center(68))
+    print(" 🚀 KHỞI ĐỘNG SDN CONTROLLER FOR MININET & VIRTUAL NETWORK ".center(68))
     print("=" * 68)
     print(f"[*] Local URL:    http://localhost:{PORT}")
     print(f"[*] Network URL:  http://0.0.0.0:{PORT}")
     print(f"[*] API Docs:     http://localhost:{PORT}/docs")
-    print(f"[*] OVS Script:   http://localhost:{PORT}/static/setup_ovs_node.sh")
     print("=" * 68)
 
     if sys.platform == "win32":
         threading.Thread(target=open_browser, args=(PORT,), daemon=True).start()
 
     from backend.api_server import app
-    # Bind 0.0.0.0 để máy trong mạng PNETLab và máy bên ngoài đều truy cập được
+    # Bind 0.0.0.0 để máy trong mạng Mininet và máy bên ngoài đều truy cập được
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

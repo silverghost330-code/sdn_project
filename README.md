@@ -21,6 +21,9 @@ D:\DỰ ÁN môn công nghệ mạng\
 │   ├── css\styles.css          # Giao diện Dark Theme chuyên nghiệp
 │   ├── js\app.js              # Logic Web Dashboard & Vẽ sơ đồ mạng Mininet realtime
 │   └── index.html              # Giao diện Dashboard quản trị SDN
+├── docs\
+│   ├── pnetlab_lab_guide.md    # Tài liệu tham khảo: hướng dẫn mở rộng trên PNETLab (tùy chọn)
+│   └── setup_ovs_node.sh       # Script cấu hình Open vSwitch node ngoài (tùy chọn)
 ├── run_web.py                  # Khởi động Web Dashboard (tự mở port, mở browser)
 ├── requirements.txt            # Thư viện Python cần thiết
 └── README.md                   # Hướng dẫn chi tiết

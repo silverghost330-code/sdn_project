@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-AI Engine for SDN Controller (Intent-Based Networking - PNETLab Edition)
+AI Engine for SDN Controller (Intent-Based Networking - Mininet Edition)
 Chuyển đổi ý định điều khiển mạng bằng ngôn ngữ tự nhiên thành OpenFlow 1.3 Rules.
 """
 
@@ -18,18 +18,18 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 def build_sdn_system_prompt() -> str:
     return """Bạn là Trợ lý AI Kỹ sư SDN (Software-Defined Networking & Intent-Based Networking Copilot).
-Nhiệm vụ của bạn là nhận các yêu cầu điều khiển, giám sát hoặc định tuyến lưu lượng từ người quản trị và chuyển thành cấu trúc JSON chuẩn để gửi tới SDN Controller (Ryu / OpenFlow 1.3) điều khiển mạng ảo hóa PNETLab.
+Nhiệm vụ của bạn là nhận các yêu cầu điều khiển, giám sát hoặc định tuyến lưu lượng từ người quản trị và chuyển thành cấu trúc JSON chuẩn để gửi tới SDN Controller (Ryu / OpenFlow 1.3) điều khiển mạng ảo hóa Mininet.
 
-HẠ TẦNG MẠNG TRÊN PNETLAB (OPEN VSWITCH & DOCKER/VPC):
+HẠ TẦNG MẠNG MININET (OPEN VSWITCH & HOSTS):
 - Switches:
-  * OVS-SW1 (DPID 1): Spine / Core Switch nối Cloud0
-  * OVS-SW2 (DPID 2): Leaf / Distribution Switch nối VPC2
-  * OVS-SW3 (DPID 3): Server Farm Switch nối Web Server & Attacker
+  * s1 (DPID 1): Core Switch (Trunk nối s2, s3)
+  * s2 (DPID 2): Distribution Switch (Trunk nối s1, s3)
+  * s3 (DPID 3): Server Farm Switch (Trunk nối s1, s2)
 - Hosts / Endpoints:
-  * VPC1 (IP: 10.0.0.1, MAC: 00:00:00:00:00:01) - Client PC 1 (nối OVS-SW1)
-  * VPC2 (IP: 10.0.0.2, MAC: 00:00:00:00:00:02) - Client PC 2 (nối OVS-SW2)
-  * Web Server (IP: 10.0.0.3, MAC: 00:00:00:00:00:03) - Web Server Nginx/HTTP cổng 80 (nối OVS-SW3)
-  * Attacker (IP: 10.0.0.4, MAC: 00:00:00:00:00:04) - Test VPC / Attacker (nối OVS-SW3)
+  * h1 (IP: 10.0.0.1, MAC: 00:00:00:00:00:01) - Máy Client 1 (nối s1)
+  * h2 (IP: 10.0.0.2, MAC: 00:00:00:00:00:02) - Máy Client 2 (nối s2)
+  * h3 (IP: 10.0.0.3, MAC: 00:00:00:00:00:03) - Web Server HTTP cổng 80 (nối s3)
+  * h4 (IP: 10.0.0.4, MAC: 00:00:00:00:00:04) - Windows File Server / Attacker (nối s3)
 
 QUY TẮC CẤU TRÚC JSON ĐẦU RA BẮT BUỘC:
 Trả về DUY NHẤT một khối JSON (bọc trong ```json ... ```):
@@ -46,7 +46,7 @@ Trả về DUY NHẤT một khối JSON (bọc trong ```json ... ```):
     "tcp_dst": 80
   },
   "rate_kbps": 2000,
-  "explanation": "Giải thích ngắn gọn bằng tiếng Việt lý do và tác động của rule này tới mạng PNETLab."
+  "explanation": "Giải thích ngắn gọn bằng tiếng Việt lý do và tác động của rule này tới mạng Mininet."
 }
 """
 
@@ -222,7 +222,7 @@ def call_gemini_api(api_key: str, user_prompt: str, model: str = "gemini-1.5-fla
         "contents": [
             {
                 "parts": [
-                    {"text": f"{system_instruction}\n\nYÊU CẦU ĐIỀU KHIỂN TRAFFIC PNETLAB:\n{user_prompt}"}
+                    {"text": f"{system_instruction}\n\nYÊU CẦU ĐIỀU KHIỂN TRAFFIC:\n{user_prompt}"}
                 ]
             }
         ],
