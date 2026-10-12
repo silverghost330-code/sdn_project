@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import time
+import subprocess
 import requests
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -120,8 +121,124 @@ class AICopilotRequest(BaseModel):
     prompt: str
     api_key: Optional[str] = ""
 
+sdn_events = [
+    {
+        "id": 1,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "type": "SYSTEM",
+        "level": "SUCCESS",
+        "message": "SDN Controller & Northbound Gateway đã sẵn sàng giám sát",
+        "details": {"mode": "Mininet Mesh Topology"}
+    }
+]
+last_link_states = {}
+
+def record_sdn_event(event_type: str, level: str, message: str, details: Optional[Dict[str, Any]] = None):
+    new_id = (sdn_events[0]["id"] + 1) if sdn_events else 1
+    d = details or {}
+    sw = None
+    if "dpid" in d:
+        sw = f"s{d['dpid']}"
+    elif "src" in d:
+        sw = d["src"]
+    elif "switch" in d:
+        sw = d["switch"]
+
+    event_entry = {
+        "id": new_id,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "type": event_type,
+        "level": level.upper(),  # SUCCESS, INFO, WARNING, DANGER
+        "message": message,
+        "detail": message,
+        "switch": sw,
+        "details": d
+    }
+    sdn_events.insert(0, event_entry)
+    if len(sdn_events) > 100:
+        sdn_events.pop()
+    return event_entry
+
+def sync_live_topology():
+    """
+    Truy vấn trực tiếp OpenFlow portdesc từ Ryu để phát hiện sự thay đổi link status UP / DOWN
+    """
+    global last_link_states
+    port_states = {}
+
+    try:
+        for dpid in [1, 2, 3]:
+            r = requests.get(f"{RYU_BASE_URL}/stats/portdesc/{dpid}", timeout=0.4)
+            if r.status_code == 200:
+                ports = r.json().get(str(dpid), [])
+                for p in ports:
+                    pno = p.get("port_no")
+                    if isinstance(pno, int):
+                        state = p.get("state", 0)
+                        is_down = bool(state & 1)
+                        port_states[(dpid, pno)] = is_down
+    except Exception:
+        pass
+
+    sw_dpid_map = {"s1": 1, "s2": 2, "s3": 3}
+    for link in sdn_state["links"]:
+        src_id = sw_dpid_map.get(link["src"])
+        dst_id = sw_dpid_map.get(link["dst"])
+        src_p = link["src_port"]
+        dst_p = link["dst_port"]
+
+        src_down = port_states.get((src_id, src_p), False)
+        dst_down = port_states.get((dst_id, dst_p), False)
+        link_down = src_down or dst_down
+        new_status = "DOWN" if link_down else "UP"
+
+        link_key = f"{link['src']}-{link['dst']}"
+        old_status = last_link_states.get(link_key, "UP")
+
+        if old_status != new_status:
+            last_link_states[link_key] = new_status
+            link["status"] = new_status
+            if new_status == "DOWN":
+                record_sdn_event(
+                    "LINK_DOWN", "DANGER",
+                    f"🚨 [ĐỨT ĐƯỜNG TRUYỀN] Liên kết {link['src']} <-> {link['dst']} (cổng {link['src']}-eth{src_p} / {link['dst']}-eth{dst_p}) đã BỊ NGẮT (DOWN)!",
+                    {"src": link["src"], "dst": link["dst"], "status": "DOWN"}
+                )
+            else:
+                record_sdn_event(
+                    "LINK_UP", "SUCCESS",
+                    f"🟢 [PHỤC HỒI KẾT NỐI] Liên kết {link['src']} <-> {link['dst']} đã HOẠT ĐỘNG TRỞ LẠI (UP)!",
+                    {"src": link["src"], "dst": link["dst"], "status": "UP"}
+                )
+        else:
+            link["status"] = new_status
+
+    for host in sdn_state["hosts"]:
+        sw_id = sw_dpid_map.get(host["switch"])
+        p_no = host["port"]
+        h_down = port_states.get((sw_id, p_no), False)
+        new_h_status = "DOWN" if h_down else "UP"
+        h_key = f"{host['id']}-{host['switch']}"
+        old_h_status = last_link_states.get(h_key, "UP")
+        if old_h_status != new_h_status:
+            last_link_states[h_key] = new_h_status
+            host["status"] = new_h_status
+            if new_h_status == "DOWN":
+                record_sdn_event("HOST_DISCONNECTED", "WARNING", f"⚠️ Cổng kết nối máy {host['id']} ({host['name']}) tới {host['switch']} bị ngắt!")
+            else:
+                record_sdn_event("HOST_CONNECTED", "SUCCESS", f"🟢 Máy {host['id']} ({host['name']}) đã kết nối lại tới {host['switch']}!")
+        else:
+            host["status"] = new_h_status
+
+class EventWebhookRequest(BaseModel):
+    type: str = "GENERIC"
+    level: str = "INFO"
+    message: str = ""
+    details: Optional[Dict[str, Any]] = None
+
 @app.get("/api/sdn/status")
 def get_status():
+    sync_live_topology()
     ryu_online = False
     try:
         r = requests.get(f"{RYU_BASE_URL}/stats/switches", timeout=0.6)
@@ -129,6 +246,8 @@ def get_status():
             ryu_online = True
     except Exception:
         pass
+
+    all_links_up = all(l.get("status") == "UP" for l in sdn_state["links"])
 
     return {
         "controller": "Ryu SDN Controller (OpenFlow 1.3)",
@@ -138,17 +257,36 @@ def get_status():
         "switch_count": len(sdn_state["switches"]),
         "host_count": len(sdn_state["hosts"]),
         "firewall_rules_count": len(sdn_state["firewall_rules"]),
-        "qos_meters_count": len(sdn_state["qos_meters"])
+        "qos_meters_count": len(sdn_state["qos_meters"]),
+        "links_status": "ALL_UP" if all_links_up else "ALERT_DOWN",
+        "events_count": len(sdn_events)
     }
 
 @app.get("/api/sdn/topology")
 def get_topology():
+    sync_live_topology()
     return {
         "platform": "Mininet Topology",
         "switches": sdn_state["switches"],
         "hosts": sdn_state["hosts"],
         "links": sdn_state["links"]
     }
+
+@app.get("/api/sdn/events")
+def get_events(limit: int = 50):
+    sync_live_topology()
+    return sdn_events[:limit]
+
+@app.post("/api/sdn/events/webhook")
+def receive_event_webhook(req: EventWebhookRequest):
+    event = record_sdn_event(req.type, req.level, req.message, req.details)
+    return {"status": "ok", "event": event}
+
+@app.delete("/api/sdn/events")
+def clear_events():
+    sdn_events.clear()
+    record_sdn_event("SYSTEM", "INFO", "Đã dọn sạch lịch sử sự kiện mạng")
+    return {"status": "ok", "message": "Đã dọn sạch nhật ký"}
 
 @app.get("/api/sdn/switches")
 def get_switches():
@@ -207,6 +345,56 @@ def get_flows(dpid: Optional[str] = "all"):
         pass
     return sdn_state["flows"]
 
+def resolve_out_port(dpid: int, src_ip: str = "", dst_ip: str = "") -> int:
+    """
+    Xác định cổng ra (egress port) tối ưu cho switch OVS theo kiến trúc Spanning Tree:
+    - s1 (Core Switch, DPID 1):
+        + h1 (10.0.0.1) -> port 1
+        + h2 (10.0.0.2) -> port 2 (sang s2)
+        + h3, h4 (10.0.0.3, 10.0.0.4) -> port 3 (sang s3)
+    - s2 (Distribution Switch, DPID 2):
+        + h2 (10.0.0.2) -> port 1
+        + Uplink tới s1 Core (dẫn tới h1, h3, h4) -> port 2
+    - s3 (Server Farm Switch, DPID 3):
+        + h3 (10.0.0.3) -> port 1
+        + h4 (10.0.0.4) -> port 2
+        + Uplink tới s1 Core (dẫn tới h1, h2) -> port 3
+    """
+    routing_map = {
+        1: {"10.0.0.1": 1, "10.0.0.2": 2, "10.0.0.3": 3, "10.0.0.4": 3},
+        2: {"10.0.0.1": 2, "10.0.0.2": 1, "10.0.0.3": 2, "10.0.0.4": 2},
+        3: {"10.0.0.1": 3, "10.0.0.2": 3, "10.0.0.3": 1, "10.0.0.4": 2}
+    }
+
+    if dpid in routing_map and dst_ip in routing_map[dpid]:
+        return routing_map[dpid][dst_ip]
+
+    # Nếu không có dst_ip nhưng có src_ip trên switch biên:
+    if src_ip:
+        if dpid == 2:
+            return 1 if src_ip != "10.0.0.2" else 2
+        elif dpid == 3:
+            return 3 if src_ip in ["10.0.0.3", "10.0.0.4"] else 1
+        elif dpid == 1:
+            return 1 if src_ip == "10.0.0.1" else 3
+
+    # Fallback tra cứu từ Ryu flow stats nếu flow đã được học
+    try:
+        r = requests.get(f"{RYU_BASE_URL}/stats/flow/{dpid}", timeout=0.6)
+        if r.status_code == 200:
+            flows = r.json().get(str(dpid), [])
+            for f in flows:
+                match = f.get("match", {})
+                if dst_ip and (match.get("nw_dst") == dst_ip or match.get("ipv4_dst") == dst_ip):
+                    for act in f.get("actions", []):
+                        if isinstance(act, str) and act.startswith("OUTPUT:"):
+                            return int(act.split(":")[1])
+    except Exception:
+        pass
+
+    default_egress = {1: 3, 2: 2, 3: 3}
+    return default_egress.get(dpid, 1)
+
 @app.get("/api/sdn/firewall")
 def get_firewall_rules():
     return sdn_state["firewall_rules"]
@@ -233,7 +421,8 @@ def add_firewall_rule(rule: FirewallRuleCreate):
         elif proto_up == "ICMP":
             match_dict["ip_proto"] = 1
 
-    ryu_actions = [] if rule.action.upper() == "DROP" else [{"type": "NORMAL"}]
+    out_port = resolve_out_port(rule.dpid, rule.src_ip, rule.dst_ip)
+    ryu_actions = [] if rule.action.upper() == "DROP" else [{"type": "OUTPUT", "port": out_port}]
 
     new_id = len(sdn_state["firewall_rules"]) + 1
     new_rule = {
@@ -264,6 +453,13 @@ def add_firewall_rule(rule: FirewallRuleCreate):
     except Exception as ex:
         print(f"[!] Lỗi đẩy Flow-Mod xuống Ryu: {ex}")
 
+    record_sdn_event(
+        "FIREWALL",
+        "WARNING" if rule.action.upper() == "DROP" else "INFO",
+        f"Đã nạp luật Firewall {rule.action.upper()} {rule.proto} từ {rule.src_ip or '*'} tới {rule.dst_ip or '*'} trên Switch s{rule.dpid}",
+        {"rule_id": new_id, "action": rule.action, "dpid": rule.dpid}
+    )
+
     return {"status": "success", "message": "Đã đẩy Flow-Mod xuống Switch Mininet thành công", "rule": new_rule}
 
 @app.delete("/api/sdn/firewall/{rule_id}")
@@ -288,6 +484,8 @@ def delete_firewall_rule(rule_id: int):
     except Exception as ex:
         print(f"[!] Lỗi gỡ bỏ Flow-Mod trên Ryu: {ex}")
 
+    record_sdn_event("FIREWALL", "INFO", f"Đã gỡ bỏ luật Firewall ID #{rule_id} trên Switch s{target_rule['dpid']}")
+
     return {"status": "success", "message": f"Đã xóa rule ID {rule_id}"}
 
 @app.get("/api/sdn/qos")
@@ -296,7 +494,7 @@ def get_qos_meters():
 
 @app.post("/api/sdn/qos")
 def add_qos_meter(meter: QoSMeterCreate):
-    new_id = len(sdn_state["qos_meters"]) + 1
+    new_id = max([m["meter_id"] for m in sdn_state["qos_meters"]], default=0) + 1
     src = (meter.src_ip or "").strip()
     dst = (meter.dst_ip or "").strip()
 
@@ -347,20 +545,76 @@ def add_qos_meter(meter: QoSMeterCreate):
         if dst:
             match_fields["nw_dst"] = dst
 
+        out_port = resolve_out_port(meter.dpid, src, dst)
         flow_meter = {
             "dpid": meter.dpid,
             "priority": 500,
             "match": match_fields,
-            "instructions": [
+            "actions": [
                 {"type": "METER", "meter_id": new_id},
-                {"type": "APPLY_ACTIONS", "actions": [{"type": "NORMAL"}]}
+                {"type": "OUTPUT", "port": out_port}
             ]
         }
         requests.post(f"{RYU_BASE_URL}/stats/flowentry/add", json=flow_meter, timeout=1.5)
     except Exception as ex:
         print(f"[!] Lỗi đẩy Meter xuống Ryu: {ex}")
 
+    record_sdn_event(
+        "QOS",
+        "INFO",
+        f"Đã kích hoạt QoS Meter Table #{new_id} ({target_display} - {meter.rate_kbps} Kbps) trên Switch s{meter.dpid}",
+        {"meter_id": new_id, "rate_kbps": meter.rate_kbps, "dpid": meter.dpid}
+    )
+
     return {"status": "success", "message": f"Đã cài đặt OpenFlow Meter Table ({target_display} - {meter.rate_kbps} Kbps) vào Switch Mininet", "meter": new_meter}
+
+def find_mininet_host_pid(host_name: str) -> Optional[int]:
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid,args"], text=True)
+        for line in out.splitlines():
+            if f"mininet:{host_name}" in line and "ps -eo" not in line and "grep" not in line:
+                parts = line.strip().split()
+                if parts and parts[0].isdigit():
+                    return int(parts[0])
+    except Exception:
+        pass
+    return None
+
+class PingTestRequest(BaseModel):
+    src: str = Field(default="h2", description="Host nguồn (h1, h2, h3, h4)")
+    dst: str = Field(default="10.0.0.4", description="IP hoặc host đích")
+    count: int = Field(default=3, description="Số lượng gói tin ping")
+
+@app.post("/api/sdn/ping")
+def test_ping(req: PingTestRequest):
+    host_map = {"h1": "10.0.0.1", "h2": "10.0.0.2", "h3": "10.0.0.3", "h4": "10.0.0.4"}
+    src_host = req.src.lower().strip()
+    dst_target = req.dst.strip()
+    if dst_target in host_map:
+        dst_target = host_map[dst_target]
+
+    pid = find_mininet_host_pid(src_host)
+    if not pid:
+        return {
+            "status": "error",
+            "message": f"Không tìm thấy tiến trình Mininet cho host '{src_host}'. Vui lòng đảm bảo mạng Mininet đang chạy.",
+            "output": ""
+        }
+
+    cmd = ["sudo", "mnexec", "-a", str(pid), "ping", "-c", str(req.count), "-W", "2", dst_target]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        output = proc.stdout or proc.stderr
+        success = proc.returncode == 0
+        return {
+            "status": "success" if success else "failed",
+            "return_code": proc.returncode,
+            "src": src_host,
+            "dst": dst_target,
+            "output": output
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e), "output": ""}
 
 @app.delete("/api/sdn/qos/{meter_id}")
 def delete_qos_meter(meter_id: int):
@@ -392,6 +646,8 @@ def delete_qos_meter(meter_id: int):
     except Exception as ex:
         print(f"[!] Lỗi gỡ bỏ Meter trên Ryu: {ex}")
 
+    record_sdn_event("QOS", "INFO", f"Đã xóa QoS Meter ID #{meter_id} khỏi Switch s{target_meter['dpid']}")
+
     return {"status": "success", "message": f"Đã xóa QoS Meter ID {meter_id}"}
 
 @app.post("/api/ai/copilot")
@@ -419,3 +675,8 @@ if os.path.exists(WEB_DIR):
     @app.get("/")
     def index():
         return FileResponse(os.path.join(WEB_DIR, "index.html"))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+

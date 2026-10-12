@@ -1,4 +1,7 @@
-// SDN Controller Frontend Logic for Mininet Linux Server
+let topoData = null;
+let allSDNEvents = [];
+let currentEventFilter = 'ALL';
+
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
     fetchStatus();
@@ -6,8 +9,18 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchFirewallRules();
     fetchQoSMeters();
     fetchFlows();
+    fetchSDNEvents();
 
-    setInterval(fetchStatus, 5000);
+    // Auto-refresh network telemetry every 2.5 seconds
+    setInterval(() => {
+        fetchStatus();
+        fetchTopology();
+        fetchSDNEvents();
+        const activeTab = document.querySelector('.tab-pane.active');
+        if (activeTab && activeTab.id === 'tab-flows') {
+            fetchFlows();
+        }
+    }, 2500);
 });
 
 function initNavigation() {
@@ -26,12 +39,12 @@ function initNavigation() {
                 setTimeout(drawTopology, 50);
             } else if (tabId === 'tab-flows') {
                 fetchFlows();
+            } else if (tabId === 'tab-events') {
+                fetchSDNEvents();
             }
         });
     });
 }
-
-let topoData = null;
 
 async function fetchStatus() {
     try {
@@ -42,7 +55,9 @@ async function fetchStatus() {
         document.getElementById('val-rule-count').innerText = data.firewall_rules_count;
         document.getElementById('val-controller-mode').innerText = data.mode;
         const ind = document.getElementById('ind-controller');
-        ind.className = data.ryu_online ? 'status-indicator online' : 'status-indicator online';
+        if (ind) {
+            ind.className = data.ryu_online ? 'status-indicator online' : 'status-indicator offline';
+        }
     } catch (e) {
         console.error('Lỗi tải status:', e);
     }
@@ -53,8 +68,54 @@ async function fetchTopology() {
         const res = await fetch('/api/sdn/topology');
         topoData = await res.json();
         drawTopology();
+        renderLinksMatrix();
     } catch (e) {
         console.error('Lỗi tải topology:', e);
+    }
+}
+
+function renderLinksMatrix() {
+    const tbody = document.getElementById('links-table-body');
+    const pillStatus = document.getElementById('val-links-status');
+    const pillInd = document.getElementById('ind-links');
+    if (!tbody || !topoData || !topoData.links) return;
+
+    tbody.innerHTML = '';
+    let downCount = 0;
+
+    topoData.links.forEach(l => {
+        const isDown = (l.status === 'DOWN');
+        if (isDown) downCount++;
+
+        const tr = document.createElement('tr');
+        if (isDown) {
+            tr.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+        }
+
+        const badgeHtml = isDown
+            ? `<span class="flow-badge badge-drop" style="font-weight:700; animation: blink 1s infinite;">🔴 ĐỨT CÁP / DOWN</span>`
+            : `<span class="flow-badge badge-allow" style="font-weight:600;">🟢 HOẠT ĐỘNG (UP)</span>`;
+
+        tr.innerHTML = `
+            <td><strong style="color:${isDown ? '#f87171' : '#38bdf8'};">${l.src.toUpperCase()} ⟷ ${l.dst.toUpperCase()}</strong></td>
+            <td><code>${l.src}-eth${l.src_port} (port ${l.src_port})</code></td>
+            <td><code>${l.dst}-eth${l.dst_port} (port ${l.dst_port})</code></td>
+            <td><span style="color:#94a3b8;">${l.speed || '1 Gbps'}</span> | <span style="color:#a855f7;">${l.latency || '0.15 ms'}</span></td>
+            <td>${badgeHtml}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    if (pillStatus && pillInd) {
+        if (downCount > 0) {
+            pillStatus.innerText = `⚠️ ${downCount} đường truyền DOWN`;
+            pillStatus.style.color = '#ef4444';
+            pillInd.className = 'status-indicator offline';
+        } else {
+            pillStatus.innerText = 'Tất cả UP (3/3)';
+            pillStatus.style.color = '#10b981';
+            pillInd.className = 'status-indicator online';
+        }
     }
 }
 
@@ -80,17 +141,65 @@ function drawTopology() {
         'h4': { x: canvas.width * 0.65, y: 440, type: 'host', label: 'h4 (Win File Server :445)' }
     };
 
-    // Draw Data Plane Trunk Links between Switches (Blue thick lines)
-    ctx.lineWidth = 3;
+    // Draw Data Plane Trunk Links between Switches
     topoData.links.forEach(link => {
         const p1 = coords[link.src];
         const p2 = coords[link.dst];
         if (p1 && p2) {
+            const isDown = (link.status === 'DOWN');
             ctx.beginPath();
             ctx.moveTo(p1.x, p1.y);
             ctx.lineTo(p2.x, p2.y);
-            ctx.strokeStyle = '#3b82f6';
+
+            if (isDown) {
+                ctx.setLineDash([8, 6]);
+                ctx.lineWidth = 4;
+                ctx.strokeStyle = '#ef4444';
+            } else {
+                ctx.setLineDash([]);
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = '#3b82f6';
+            }
             ctx.stroke();
+            ctx.setLineDash([]); // Reset line dash
+
+            // Draw link label at midpoint
+            const midX = (p1.x + p2.x) / 2;
+            const midY = (p1.y + p2.y) / 2;
+            
+            ctx.save();
+            if (isDown) {
+                // Red Warning Box on broken link
+                ctx.fillStyle = '#7f1d1d';
+                ctx.strokeStyle = '#ef4444';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.roundRect ? ctx.roundRect(midX - 45, midY - 12, 90, 24, 6) : ctx.rect(midX - 45, midY - 12, 90, 24);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#fef2f2';
+                ctx.font = 'bold 11px Inter, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('⚠️ LINK DOWN', midX, midY);
+            } else {
+                // Soft blue indicator
+                ctx.fillStyle = '#0f172a';
+                ctx.strokeStyle = '#3b82f6';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.roundRect ? ctx.roundRect(midX - 25, midY - 9, 50, 18, 4) : ctx.rect(midX - 25, midY - 9, 50, 18);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#93c5fd';
+                ctx.font = '10px Inter, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(link.speed || '1 Gbps', midX, midY);
+            }
+            ctx.restore();
         }
     });
 
@@ -138,6 +247,143 @@ function drawTopology() {
             ctx.fillText(node.label, node.x, node.y + 28);
         }
     });
+}
+
+// SDN Events & Network State Change Handlers
+async function fetchSDNEvents() {
+    try {
+        const res = await fetch('/api/sdn/events');
+        allSDNEvents = await res.json();
+        updateEventCounters();
+        renderSDNEvents();
+    } catch (e) {
+        console.error('Lỗi tải SDN Events:', e);
+    }
+}
+
+function updateEventCounters() {
+    const dangerCount = allSDNEvents.filter(e => (e.level || '').toUpperCase() === 'DANGER').length;
+    const successCount = allSDNEvents.filter(e => (e.level || '').toUpperCase() === 'SUCCESS').length;
+    const configCount = allSDNEvents.filter(e => {
+        const lvl = (e.level || '').toUpperCase();
+        return lvl === 'INFO' || lvl === 'WARNING';
+    }).length;
+
+    const elAll = document.getElementById('count-all');
+    const elDanger = document.getElementById('count-danger');
+    const elSuccess = document.getElementById('count-success');
+    const elConfig = document.getElementById('count-config');
+
+    if (elAll) elAll.innerText = allSDNEvents.length;
+    if (elDanger) elDanger.innerText = dangerCount;
+    if (elSuccess) elSuccess.innerText = successCount;
+    if (elConfig) elConfig.innerText = configCount;
+
+    // Badge in sidebar navigation
+    const badge = document.getElementById('badge-events-count');
+    if (badge) {
+        if (dangerCount > 0) {
+            badge.style.display = 'inline-block';
+            badge.style.backgroundColor = '#ef4444';
+            badge.innerText = `${dangerCount} Lỗi`;
+        } else if (allSDNEvents.length > 0) {
+            badge.style.display = 'inline-block';
+            badge.style.backgroundColor = '#3b82f6';
+            badge.innerText = `${allSDNEvents.length}`;
+        } else {
+            badge.style.display = 'none';
+        }
+    }
+}
+
+function filterEvents(type) {
+    currentEventFilter = type;
+    
+    // Update active button state
+    ['all', 'danger', 'success', 'config'].forEach(k => {
+        const btn = document.getElementById(`filter-${k}`);
+        if (btn) {
+            if (k.toUpperCase() === type) {
+                btn.classList.add('active-filter');
+                btn.style.boxShadow = '0 0 0 2px #3b82f6';
+            } else {
+                btn.classList.remove('active-filter');
+                btn.style.boxShadow = 'none';
+            }
+        }
+    });
+
+    renderSDNEvents();
+}
+
+function renderSDNEvents() {
+    const tbody = document.getElementById('events-table-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    let filtered = allSDNEvents;
+    if (currentEventFilter === 'DANGER') {
+        filtered = allSDNEvents.filter(e => (e.level || '').toUpperCase() === 'DANGER');
+    } else if (currentEventFilter === 'SUCCESS') {
+        filtered = allSDNEvents.filter(e => (e.level || '').toUpperCase() === 'SUCCESS');
+    } else if (currentEventFilter === 'CONFIG') {
+        filtered = allSDNEvents.filter(e => {
+            const lvl = (e.level || '').toUpperCase();
+            return lvl === 'INFO' || lvl === 'WARNING';
+        });
+    }
+
+    if (!filtered || filtered.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:#64748b; padding:28px;">Không có sự kiện hoặc cảnh báo nào trong danh mục này</td></tr>`;
+        return;
+    }
+
+    filtered.forEach(ev => {
+        const tr = document.createElement('tr');
+        
+        const lvl = (ev.level || '').toUpperCase();
+        let badgeClass = 'badge-allow';
+        let levelLabel = 'INFO';
+        let rowBg = 'transparent';
+
+        if (lvl === 'DANGER') {
+            badgeClass = 'badge-drop';
+            levelLabel = '🚨 CẢNH BÁO';
+            rowBg = 'rgba(239, 68, 68, 0.08)';
+        } else if (lvl === 'SUCCESS') {
+            badgeClass = 'badge-allow';
+            levelLabel = '🟢 PHỤC HỒI';
+            rowBg = 'rgba(16, 185, 129, 0.06)';
+        } else if (lvl === 'WARNING') {
+            badgeClass = 'badge-meter';
+            levelLabel = '⚡ CẢNH BÁO / CẤU HÌNH';
+        } else {
+            levelLabel = 'ℹ️ THÔNG TIN';
+        }
+
+        tr.style.backgroundColor = rowBg;
+
+        const swLabel = ev.switch ? `<span class="flow-badge" style="background:#0f172a; color:#38bdf8; border:1px solid #0284c7;">${ev.switch.toUpperCase()}</span>` : `<span style="color:#94a3b8;">Hệ thống</span>`;
+
+        tr.innerHTML = `
+            <td style="color:#94a3b8; font-family:monospace; font-size:0.85rem;">${ev.timestamp || 'N/A'}</td>
+            <td><span class="flow-badge ${badgeClass}">${ev.type || 'EVENT'}</span></td>
+            <td>${swLabel}</td>
+            <td style="color:#f8fafc; font-size:0.9rem;">${ev.detail || ev.message || ''}</td>
+            <td><strong style="font-size:0.8rem; color:${lvl === 'DANGER' ? '#f87171' : (lvl === 'SUCCESS' ? '#34d399' : '#38bdf8')}">${levelLabel}</strong></td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+async function clearSDNEvents() {
+    if (!confirm('Bạn có chắc muốn xóa toàn bộ lịch sử biến động mạng và cảnh báo?')) return;
+    try {
+        await fetch('/api/sdn/events', { method: 'DELETE' });
+        await fetchSDNEvents();
+    } catch (e) {
+        alert('Lỗi xóa events: ' + e);
+    }
 }
 
 // Firewall Management

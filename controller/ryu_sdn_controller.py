@@ -118,3 +118,73 @@ class SDNDataController(app_manager.RyuApp):
             in_port=in_port, actions=actions, data=data
         )
         datapath.send_msg(out)
+
+    def notify_backend(self, event_type, level, message, details=None):
+        """Gửi thông báo biến động mạng về FastAPI Backend bất đồng bộ (non-blocking)"""
+        def _send():
+            try:
+                import urllib.request
+                import json
+                payload = json.dumps({
+                    "type": event_type,
+                    "level": level,
+                    "message": message,
+                    "details": details or {}
+                }).encode('utf-8')
+                req = urllib.request.Request(
+                    "http://127.0.0.1:8000/api/sdn/events/webhook",
+                    data=payload,
+                    headers={"Content-Type": "application/json"}
+                )
+                urllib.request.urlopen(req, timeout=0.6)
+            except Exception:
+                pass
+        import threading
+        threading.Thread(target=_send, daemon=True).start()
+
+    @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
+    def port_status_handler(self, ev):
+        """Phát hiện tức thời khi có cổng switch bị Up/Down/Rút cáp"""
+        msg = ev.msg
+        reason = msg.reason
+        port_no = msg.desc.port_no
+        dpid = msg.datapath.id
+        ofproto = msg.datapath.ofproto
+        port_name = msg.desc.name.decode('utf-8', 'ignore') if isinstance(msg.desc.name, bytes) else str(msg.desc.name)
+
+        is_down = bool(msg.desc.state & ofproto.OFPPS_LINK_DOWN)
+        state_str = "DOWN" if is_down else "UP"
+
+        if reason == ofproto.OFPPR_ADD:
+            desc = f"Switch s{dpid}: Cổng {port_no} ({port_name}) vừa được thêm vào mạng"
+            self.logger.warning(f"🔔 [PORT ADD] {desc}")
+            self.notify_backend("PORT_ADD", "INFO", desc, {"dpid": dpid, "port": port_no, "name": port_name})
+        elif reason == ofproto.OFPPR_DELETE:
+            desc = f"Switch s{dpid}: Cổng {port_no} ({port_name}) đã bị xóa khỏi thiết bị"
+            self.logger.warning(f"🚨 [PORT DELETE] {desc}")
+            self.notify_backend("PORT_DELETE", "DANGER", desc, {"dpid": dpid, "port": port_no, "name": port_name})
+        elif reason == ofproto.OFPPR_MODIFY:
+            level = "DANGER" if is_down else "SUCCESS"
+            icon = "🚨" if is_down else "🟢"
+            desc = f"{icon} Switch s{dpid}: Cổng {port_no} ({port_name}) chuyển trạng thái -> {state_str}"
+            self.logger.warning(f"[PORT STATUS] {desc}")
+            self.notify_backend("PORT_STATUS", level, desc, {"dpid": dpid, "port": port_no, "name": port_name, "state": state_str})
+
+    @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
+    def flow_removed_handler(self, ev):
+        """Bắt sự kiện khi Flow hết hạn idle_timeout hoặc bị gỡ"""
+        msg = ev.msg
+        dp = msg.datapath
+        desc = f"Switch s{dp.id}: Luồng (Priority {msg.priority}) đã hết hạn TCAM (Khớp {msg.packet_count} gói, {msg.byte_count} B)"
+        self.logger.info(f"ℹ️ [FLOW TIMEOUT] {desc}")
+        self.notify_backend("FLOW_REMOVED", "INFO", desc, {"dpid": dp.id, "priority": msg.priority, "packets": msg.packet_count})
+
+    @set_ev_cls(ofp_event.EventOFPErrorMsg, MAIN_DISPATCHER)
+    def error_msg_handler(self, ev):
+        """Bắt các lỗi giao thức OpenFlow từ switch"""
+        msg = ev.msg
+        dp = msg.datapath
+        desc = f"Switch s{dp.id} báo lỗi OpenFlow: type=0x{msg.type:02x}, code=0x{msg.code:02x}"
+        self.logger.error(f"⚠️ [OFP ERROR] {desc}")
+        self.notify_backend("OFP_ERROR", "WARNING", desc, {"dpid": dp.id, "type": msg.type, "code": msg.code})
+

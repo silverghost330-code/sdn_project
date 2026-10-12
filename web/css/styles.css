@@ -2103,3 +2103,16 @@ body {
     color: #f87171 !important;
     border-left: 3px solid var(--accent-amber) !important;
 }
+
+@keyframes blink {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.45; transform: scale(0.97); }
+}
+
+.active-filter {
+    background: rgba(59, 130, 246, 0.25) !important;
+    border-color: #3b82f6 !important;
+    color: #fff !important;
+    font-weight: 600;
+}
+

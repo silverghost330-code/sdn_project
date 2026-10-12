@@ -108,11 +108,16 @@
                 <strong id="val-controller-mode">Mininet Server</strong>
             </div>
             <div class="stat-pill">
+                <span class="status-indicator online" id="ind-links"></span>
+                <span class="stat-label">Đường truyền:</span>
+                <strong id="val-links-status" style="color: #10b981;">Tất cả UP</strong>
+            </div>
+            <div class="stat-pill">
                 <span class="stat-label">OVS Switches:</span>
                 <strong id="val-switch-count">3</strong>
             </div>
             <div class="stat-pill">
-                <span class="stat-label">Hosts & Servers:</span>
+                <span class="stat-label">Hosts:</span>
                 <strong id="val-host-count">4</strong>
             </div>
             <div class="stat-pill">
@@ -170,6 +175,15 @@
                     <span>Bảng Luồng (Flow Tables)</span>
                 </button>
 
+                <button class="nav-item" data-tab="tab-events" style="position:relative;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+                    </svg>
+                    <span>Cảnh Báo & Biến Động</span>
+                    <span id="badge-events-count" class="mininet-badge" style="background:#ef4444; margin-left:auto; display:none; padding:1px 6px; font-size:0.7rem;">0</span>
+                </button>
+
                 <button class="nav-item" data-tab="tab-copilot">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="12" cy="12" r="10"></circle>
@@ -200,6 +214,32 @@
 
                 <div class="topo-canvas-container">
                     <canvas id="topoCanvas"></canvas>
+                </div>
+
+                <!-- Live Link Status Matrix -->
+                <div class="card" style="margin-top: 16px; padding: 16px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+                        <h3 style="margin:0; font-size:1rem; display:flex; align-items:center; gap:8px;">
+                            <span>⚡ Trạng Thái Các Liên Kết Thực Tế (Live Links Matrix)</span>
+                        </h3>
+                        <span style="font-size:0.8rem; color:#94a3b8;">Tự động cập nhật tức thời khi gõ <code>link s1 s2 down/up</code> trong Mininet</span>
+                    </div>
+                    <div style="overflow-x:auto;">
+                        <table class="table" style="font-size:0.85rem;">
+                            <thead>
+                                <tr>
+                                    <th>Liên kết</th>
+                                    <th>Cổng Nguồn</th>
+                                    <th>Cổng Đích</th>
+                                    <th>Tốc độ lý thuyết</th>
+                                    <th>Trạng thái thực tế</th>
+                                </tr>
+                            </thead>
+                            <tbody id="links-table-body">
+                                <!-- Populated dynamically by JS -->
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </section>
 
@@ -383,7 +423,49 @@
                 </div>
             </section>
 
-            <!-- TAB 5: AI COPILOT -->
+            <!-- TAB 5: EVENTS & ALERTS -->
+            <section id="tab-events" class="tab-pane">
+                <div class="pane-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                    <div>
+                        <h2>Nhật Ký Biến Động Mạng & Cảnh Báo (Live SDN Events Stream)</h2>
+                        <p class="text-muted">Ghi nhận tức thời mọi sự kiện OpenFlow 1.3: Cáp mạng bị ngắt (Link Down), phục hồi (Link Up), nạp/xóa QoS và Firewall</p>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-secondary btn-sm" onclick="fetchSDNEvents()">
+                            <span>🔄 Làm Mới</span>
+                        </button>
+                        <button class="btn btn-danger btn-sm" onclick="clearSDNEvents()" style="background:#dc2626; border-color:#ef4444;">
+                            <span>🗑️ Dọn Sạch Lịch Sử</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Event Filters -->
+                <div style="display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap;">
+                    <button class="btn btn-secondary btn-sm active-filter" onclick="filterEvents('ALL')" id="filter-all" style="font-size:0.8rem;">Tất cả (<span id="count-all">0</span>)</button>
+                    <button class="btn btn-secondary btn-sm" onclick="filterEvents('DANGER')" id="filter-danger" style="font-size:0.8rem; color:#f87171;">🚨 Cảnh báo Đứt cáp (<span id="count-danger">0</span>)</button>
+                    <button class="btn btn-secondary btn-sm" onclick="filterEvents('SUCCESS')" id="filter-success" style="font-size:0.8rem; color:#34d399;">🟢 Phục hồi kết nối (<span id="count-success">0</span>)</button>
+                    <button class="btn btn-secondary btn-sm" onclick="filterEvents('CONFIG')" id="filter-config" style="font-size:0.8rem; color:#38bdf8;">⚡ QoS & Firewall (<span id="count-config">0</span>)</button>
+                </div>
+
+                <div class="card">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th style="width: 160px;">Thời gian</th>
+                                <th style="width: 110px;">Mức độ</th>
+                                <th style="width: 140px;">Loại biến động</th>
+                                <th>Chi tiết sự kiện</th>
+                            </tr>
+                        </thead>
+                        <tbody id="events-table-body">
+                            <!-- Populated dynamically by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB 6: AI COPILOT -->
             <section id="tab-copilot" class="tab-pane">
                 <div class="pane-header">
                     <div>
