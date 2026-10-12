@@ -41,6 +41,8 @@ function initNavigation() {
                 fetchFlows();
             } else if (tabId === 'tab-events') {
                 fetchSDNEvents();
+            } else if (tabId === 'tab-snapshots') {
+                fetchSnapshots();
             }
         });
     });
@@ -735,3 +737,209 @@ function quickSendAI(text) {
         }
     }
 }
+
+// ==============================================================================
+// SNAPSHOT & 1-CLICK ROLLBACK MANAGEMENT FRONTEND
+// ==============================================================================
+
+let currentSnapshots = [];
+let selectedSnapshotId = null;
+let selectedSnapshotData = null;
+
+async function fetchSnapshots() {
+    try {
+        const res = await fetch('/api/sdn/snapshots');
+        currentSnapshots = await res.json();
+        renderSnapshotList();
+        
+        // Tự động chọn snapshot đầu tiên nếu chưa chọn bản nào
+        if (currentSnapshots.length > 0 && !selectedSnapshotId) {
+            selectSnapshot(currentSnapshots[0].id);
+        }
+    } catch (e) {
+        console.error('Lỗi tải danh sách snapshots:', e);
+    }
+}
+
+function renderSnapshotList() {
+    const container = document.getElementById('snapshot-list-container');
+    const badgeCount = document.getElementById('snapshot-count-badge');
+    if (!container) return;
+
+    if (badgeCount) {
+        badgeCount.innerText = `${currentSnapshots.length} bản`;
+    }
+
+    if (!currentSnapshots || currentSnapshots.length === 0) {
+        container.innerHTML = '<div style="text-align:center; padding:30px; color:#64748b;">Chưa có bản snapshot nào. Hãy bấm "Tạo Snapshot Mới"!</div>';
+        return;
+    }
+
+    container.innerHTML = '';
+    currentSnapshots.forEach(snap => {
+        const item = document.createElement('div');
+        item.className = 'snapshot-item' + (snap.id === selectedSnapshotId ? ' active' : '');
+        item.onclick = () => selectSnapshot(snap.id);
+
+        const autoBadge = snap.is_auto 
+            ? '<span class="mininet-badge" style="background:#f59e0b; font-size:0.65rem; margin-left:6px;">AUTO</span>' 
+            : '';
+
+        item.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                <div>
+                    <div class="snapshot-name">${snap.name} ${autoBadge}</div>
+                    <div class="snapshot-date">🕒 ${snap.created_at || 'N/A'}</div>
+                </div>
+            </div>
+            <div style="margin-top:6px; display:flex; gap:6px; font-size:0.75rem;">
+                <span class="flow-badge badge-allow" style="padding:1px 6px;">${snap.firewall_count} FW</span>
+                <span class="flow-badge badge-meter" style="padding:1px 6px;">${snap.qos_count} QoS</span>
+            </div>
+            ${snap.description ? `<div style="font-size:0.75rem; color:#94a3b8; margin-top:4px; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">${snap.description}</div>` : ''}
+        `;
+        container.appendChild(item);
+    });
+}
+
+async function selectSnapshot(id) {
+    selectedSnapshotId = id;
+    renderSnapshotList();
+
+    const nameEl = document.getElementById('inspector-snap-name');
+    const timeEl = document.getElementById('inspector-snap-time');
+    const jsonView = document.getElementById('snapshot-json-view');
+    const btnRestore = document.getElementById('btn-restore-snap');
+    const btnDownload = document.getElementById('btn-download-snap');
+    const btnDelete = document.getElementById('btn-delete-snap');
+    const metaFw = document.getElementById('meta-snap-fw');
+    const metaQos = document.getElementById('meta-snap-qos');
+
+    if (jsonView) jsonView.innerText = 'Đang đọc nội dung file sao lưu...';
+
+    try {
+        const res = await fetch(`/api/sdn/snapshots/${id}`);
+        if (!res.ok) throw new Error('Không tìm thấy snapshot');
+        selectedSnapshotData = await res.json();
+
+        if (nameEl) nameEl.innerText = selectedSnapshotData.name || id;
+        if (timeEl) timeEl.innerText = `ID: ${id} • Tạo lúc: ${selectedSnapshotData.created_at || 'N/A'}`;
+        if (metaFw) metaFw.innerText = (selectedSnapshotData.firewall_rules || []).length;
+        if (metaQos) metaQos.innerText = (selectedSnapshotData.qos_meters || []).length;
+
+        if (jsonView) {
+            jsonView.innerText = JSON.stringify(selectedSnapshotData, null, 2);
+        }
+
+        if (btnRestore) btnRestore.disabled = false;
+        if (btnDownload) btnDownload.disabled = false;
+        if (btnDelete) btnDelete.disabled = false;
+    } catch (e) {
+        if (jsonView) jsonView.innerText = 'Lỗi tải chi tiết snapshot: ' + e;
+    }
+}
+
+function openCreateSnapshotModal() {
+    const modal = document.getElementById('modal-create-snapshot');
+    const inputName = document.getElementById('input-snap-name');
+    const inputDesc = document.getElementById('input-snap-desc');
+    if (inputName) inputName.value = `Snapshot_${new Date().toLocaleTimeString('vi-VN').replace(/:/g, '')}`;
+    if (inputDesc) inputDesc.value = 'Sao lưu thủ công trạng thái mạng';
+    if (modal) modal.classList.add('active');
+}
+
+function closeCreateSnapshotModal() {
+    const modal = document.getElementById('modal-create-snapshot');
+    if (modal) modal.classList.remove('active');
+}
+
+async function handleCreateSnapshotSubmit(e) {
+    e.preventDefault();
+    const name = document.getElementById('input-snap-name').value.trim();
+    const desc = document.getElementById('input-snap-desc').value.trim();
+
+    try {
+        const res = await fetch('/api/sdn/snapshots', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, description: desc })
+        });
+        const data = await res.json();
+        closeCreateSnapshotModal();
+        if (res.ok) {
+            alert(`✅ Đã chụp Snapshot '${name}' thành công!`);
+            await fetchSnapshots();
+            if (data.snapshot) {
+                selectSnapshot(data.snapshot.id);
+            }
+        }
+    } catch (err) {
+        alert('Lỗi tạo snapshot: ' + err);
+    }
+}
+
+async function restoreCurrentSnapshot() {
+    if (!selectedSnapshotId || !selectedSnapshotData) return;
+    const snapName = selectedSnapshotData.name || selectedSnapshotId;
+    const confirmed = confirm(`⚠️ CẢNH BÁO 1-CLICK ROLLBACK:\nBạn có chắc chắn muốn khôi phục mạng về bản sao lưu '${snapName}'?\n\nToàn bộ Flow Tables và Meter hiện tại sẽ được hoàn nguyên về đúng cấu hình này.`);
+    if (!confirmed) return;
+
+    const btn = document.getElementById('btn-restore-snap');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerText = '⏳ Đang hoàn nguyên mạng...';
+    }
+
+    try {
+        const res = await fetch(`/api/sdn/snapshots/${selectedSnapshotId}/restore`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            alert(`🎉 THÀNH CÔNG:\n${data.message}\n- Đã khôi phục ${data.restored_firewall} luật Firewall\n- Đã khôi phục ${data.restored_qos} cấu hình QoS`);
+            // Làm mới toàn bộ dữ liệu trên Dashboard
+            fetchStatus();
+            fetchTopology();
+            fetchFirewallRules();
+            fetchQoSMeters();
+            fetchFlows();
+            fetchSDNEvents();
+        } else {
+            alert('Lỗi khôi phục: ' + (data.detail || data.message));
+        }
+    } catch (e) {
+        alert('Lỗi kết nối khi restore: ' + e);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerText = '⚡ 1-Click Rollback';
+        }
+    }
+}
+
+function downloadCurrentSnapshot() {
+    if (!selectedSnapshotId) return;
+    window.open(`/api/sdn/snapshots/${selectedSnapshotId}/download`, '_blank');
+}
+
+async function deleteCurrentSnapshot() {
+    if (!selectedSnapshotId) return;
+    if (!confirm('Bạn có chắc chắn muốn xóa bản sao lưu này? Hành động này không thể hoàn tác.')) return;
+
+    try {
+        const res = await fetch(`/api/sdn/snapshots/${selectedSnapshotId}`, { method: 'DELETE' });
+        if (res.ok) {
+            alert('Đã xóa bản snapshot thành công.');
+            selectedSnapshotId = null;
+            selectedSnapshotData = null;
+            document.getElementById('inspector-snap-name').innerText = 'Chọn một bản sao lưu';
+            document.getElementById('inspector-snap-time').innerText = '';
+            document.getElementById('snapshot-json-view').innerText = 'Vui lòng chọn một bản snapshot ở danh sách bên trái.';
+            document.getElementById('btn-restore-snap').disabled = true;
+            document.getElementById('btn-download-snap').disabled = true;
+            document.getElementById('btn-delete-snap').disabled = true;
+            await fetchSnapshots();
+        }
+    } catch (e) {
+        alert('Lỗi xóa snapshot: ' + e);
+    }
+}
+

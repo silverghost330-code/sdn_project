@@ -184,6 +184,15 @@
                     <span id="badge-events-count" class="mininet-badge" style="background:#ef4444; margin-left:auto; display:none; padding:1px 6px; font-size:0.7rem;">0</span>
                 </button>
 
+                <button class="nav-item" data-tab="tab-snapshots">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                        <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                        <polyline points="7 3 7 8 15 8"></polyline>
+                    </svg>
+                    <span>Sao Lưu & Snapshot</span>
+                </button>
+
                 <button class="nav-item" data-tab="tab-copilot">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="12" cy="12" r="10"></circle>
@@ -504,7 +513,92 @@
                     </form>
                 </div>
             </section>
+
+            <!-- TAB 7: SNAPSHOTS & DISASTER RECOVERY -->
+            <section id="tab-snapshots" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2>Quản Lý Sao Lưu & Snapshot Mạng (Disaster Recovery)</h2>
+                        <p class="text-muted">Chụp ảnh tức thời trạng thái SDN, lưu trữ Flow Tables, QoS Meters và hỗ trợ 1-Click Rollback</p>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-secondary btn-sm" onclick="fetchSnapshots()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                            Làm Mới
+                        </button>
+                        <button class="btn btn-primary btn-sm" onclick="openCreateSnapshotModal()">
+                            📸 Tạo Snapshot Mới
+                        </button>
+                    </div>
+                </div>
+
+                <div class="snapshots-layout">
+                    <!-- Cột trái: Danh sách Snapshot -->
+                    <div class="card snapshot-list-card">
+                        <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                            <span style="font-weight:600; color:#e2e8f0;">📂 Danh Sách Bản Sao Lưu</span>
+                            <span id="snapshot-count-badge" class="mininet-badge" style="background:#3b82f6;">0 bản</span>
+                        </div>
+                        <div class="snapshot-list" id="snapshot-list-container">
+                            <div style="text-align:center; padding:30px; color:#64748b;">Đang tải danh sách snapshot...</div>
+                        </div>
+                    </div>
+
+                    <!-- Cột phải: Inspector xem chi tiết Snapshot -->
+                    <div class="card snapshot-content-card">
+                        <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                            <div>
+                                <span style="font-weight:600; color:#38bdf8;" id="inspector-snap-name">Chọn một bản sao lưu</span>
+                                <small style="display:block; color:#94a3b8; font-size:0.75rem;" id="inspector-snap-time"></small>
+                            </div>
+                            <div style="display:flex; gap:8px;" id="snapshot-actions-bar">
+                                <button class="btn btn-primary btn-sm" id="btn-restore-snap" onclick="restoreCurrentSnapshot()" style="background:#10b981; border-color:#059669;" disabled>
+                                    ⚡ 1-Click Rollback
+                                </button>
+                                <button class="btn btn-secondary btn-sm" id="btn-download-snap" onclick="downloadCurrentSnapshot()" disabled>
+                                    📥 Tải JSON
+                                </button>
+                                <button class="btn btn-danger btn-sm" id="btn-delete-snap" onclick="deleteCurrentSnapshot()" style="background:#dc2626; border-color:#ef4444;" disabled>
+                                    🗑️ Xóa
+                                </button>
+                            </div>
+                        </div>
+                        <div style="padding:10px 14px; background:rgba(0,0,0,0.25); border-bottom:1px solid #1e293b; font-size:0.82rem; color:#cbd5e1; display:flex; gap:16px;">
+                            <span>🛡️ Firewall: <strong id="meta-snap-fw" style="color:#38bdf8;">0</strong></span>
+                            <span>⚡ QoS Meters: <strong id="meta-snap-qos" style="color:#f59e0b;">0</strong></span>
+                            <span>🔀 Dump Switches: <strong id="meta-snap-sw" style="color:#34d399;">3</strong></span>
+                        </div>
+                        <pre class="code-view" id="snapshot-json-view" style="flex:1; margin:0; border-radius:0;">Vui lòng chọn một bản snapshot ở danh sách bên trái để kiểm tra cấu hình chi tiết.</pre>
+                    </div>
+                </div>
+            </section>
         </main>
+    </div>
+
+    <!-- Modal Tạo Snapshot Mới -->
+    <div class="modal-overlay" id="modal-create-snapshot">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 style="margin:0; font-size:1.1rem; color:#38bdf8;">📸 Chụp Snapshot Trạng Thái SDN</h3>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="closeCreateSnapshotModal()">✕</button>
+            </div>
+            <form onsubmit="handleCreateSnapshotSubmit(event)">
+                <div class="modal-body" style="display:flex; flex-direction:column; gap:12px;">
+                    <div>
+                        <label style="font-size:0.85rem; color:#94a3b8; display:block; margin-bottom:4px;">Tên Snapshot:</label>
+                        <input type="text" id="input-snap-name" class="form-control" placeholder="VD: Truoc_Khi_Chan_SMB_445" required>
+                    </div>
+                    <div>
+                        <label style="font-size:0.85rem; color:#94a3b8; display:block; margin-bottom:4px;">Ghi chú / Mục đích sao lưu:</label>
+                        <textarea id="input-snap-desc" class="form-control" rows="3" placeholder="Ghi chú thêm về trạng thái mạng tại thời điểm này..."></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeCreateSnapshotModal()">Hủy</button>
+                    <button type="submit" class="btn btn-primary">Xác Nhận Tạo Snapshot</button>
+                </div>
+            </form>
+        </div>
     </div>
 
     <script src="/static/js/app.js"></script>

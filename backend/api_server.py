@@ -663,10 +663,276 @@ def ai_copilot(req: AICopilotRequest):
         # Nếu Gemini API lỗi (ví dụ key sai / hết quota), tự động fallback sang local parser!
 
     parsed_rule = parse_sdn_intent_locally(req.prompt)
+# ==============================================================================
+# SNAPSHOT & 1-CLICK ROLLBACK MANAGEMENT ENGINE
+# ==============================================================================
+
+BACKUP_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "backups", "snapshots"))
+os.makedirs(BACKUP_DIR, exist_ok=True)
+
+class SnapshotCreateRequest(BaseModel):
+    name: str = Field(default="Snapshot_SDN", description="Tên bản sao lưu")
+    description: Optional[str] = Field(default="", description="Ghi chú mục đích sao lưu")
+
+def create_system_snapshot(name: str, description: str = "", is_auto: bool = False) -> Dict[str, Any]:
+    """Tạo bản snapshot lưu toàn bộ cấu hình SDN và Flow Table"""
+    snap_id = f"snap_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{int(time.time() % 1000)}"
+    
+    # Dump flows thực tế từ Ryu nếu có
+    live_flows = {}
+    for dpid in [1, 2, 3]:
+        try:
+            r = requests.get(f"{RYU_BASE_URL}/stats/flow/{dpid}", timeout=0.6)
+            if r.status_code == 200:
+                live_flows[str(dpid)] = r.json().get(str(dpid), [])
+        except Exception:
+            pass
+
+    snapshot_data = {
+        "id": snap_id,
+        "name": name,
+        "description": description or ("Bản sao lưu tự động trước khi thay đổi" if is_auto else "Bản sao lưu cấu hình SDN"),
+        "is_auto": is_auto,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": time.time(),
+        "firewall_rules": list(sdn_state.get("firewall_rules", [])),
+        "qos_meters": list(sdn_state.get("qos_meters", [])),
+        "live_flows": live_flows,
+        "switches": list(sdn_state.get("switches", [])),
+        "hosts": list(sdn_state.get("hosts", [])),
+        "links": list(sdn_state.get("links", []))
+    }
+
+    file_path = os.path.join(BACKUP_DIR, f"{snap_id}.json")
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(snapshot_data, f, ensure_ascii=False, indent=2)
+
+    record_sdn_event(
+        "SNAPSHOT_CREATE",
+        "INFO",
+        f"📸 Đã tạo bản Snapshot '{name}' ({len(snapshot_data['firewall_rules'])} Firewall, {len(snapshot_data['qos_meters'])} QoS)",
+        {"snapshot_id": snap_id, "name": name}
+    )
+
+    return snapshot_data
+
+@app.get("/api/sdn/snapshots")
+def list_snapshots():
+    """Lấy danh sách tất cả các bản snapshot đã lưu"""
+    snapshots = []
+    if os.path.exists(BACKUP_DIR):
+        for fname in os.listdir(BACKUP_DIR):
+            if fname.endswith(".json"):
+                fpath = os.path.join(BACKUP_DIR, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        snapshots.append({
+                            "id": data.get("id", fname[:-5]),
+                            "name": data.get("name", fname[:-5]),
+                            "description": data.get("description", ""),
+                            "is_auto": data.get("is_auto", False),
+                            "created_at": data.get("created_at", ""),
+                            "timestamp": data.get("timestamp", 0),
+                            "firewall_count": len(data.get("firewall_rules", [])),
+                            "qos_count": len(data.get("qos_meters", [])),
+                            "file_size_bytes": os.path.getsize(fpath)
+                        })
+                except Exception as ex:
+                    print(f"[!] Lỗi đọc snapshot {fname}: {ex}")
+
+    snapshots.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+
+    # Nếu chưa có bản snapshot nào, tự động tạo bản Baseline ban đầu
+    if len(snapshots) == 0:
+        base = create_system_snapshot("Baseline_Khoi_Tao_Chuan", "Bản sao lưu chuẩn ban đầu của hệ thống", is_auto=False)
+        snapshots.append({
+            "id": base["id"],
+            "name": base["name"],
+            "description": base["description"],
+            "is_auto": False,
+            "created_at": base["created_at"],
+            "timestamp": base["timestamp"],
+            "firewall_count": len(base["firewall_rules"]),
+            "qos_count": len(base["qos_meters"]),
+            "file_size_bytes": os.path.getsize(os.path.join(BACKUP_DIR, f"{base['id']}.json"))
+        })
+
+    return snapshots
+
+@app.post("/api/sdn/snapshots")
+def create_snapshot_endpoint(req: SnapshotCreateRequest):
+    """API Tạo Snapshot mới"""
+    name = req.name.strip() or f"Snapshot_{datetime.now().strftime('%H%M%S')}"
+    snap = create_system_snapshot(name, req.description, is_auto=False)
+    return {"status": "success", "message": f"Đã tạo bản sao lưu '{name}' thành công", "snapshot": snap}
+
+@app.get("/api/sdn/snapshots/{snapshot_id}")
+def get_snapshot_detail(snapshot_id: str):
+    """Xem chi tiết nội dung file snapshot"""
+    fpath = os.path.join(BACKUP_DIR, f"{snapshot_id}.json")
+    if not os.path.exists(fpath):
+        raise HTTPException(status_code=404, detail="Không tìm thấy bản Snapshot")
+    try:
+        with open(fpath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"Lỗi đọc file snapshot: {ex}")
+
+@app.delete("/api/sdn/snapshots/{snapshot_id}")
+def delete_snapshot_endpoint(snapshot_id: str):
+    """Xóa một bản snapshot"""
+    fpath = os.path.join(BACKUP_DIR, f"{snapshot_id}.json")
+    if not os.path.exists(fpath):
+        raise HTTPException(status_code=404, detail="Không tìm thấy bản Snapshot cần xóa")
+    try:
+        os.remove(fpath)
+        record_sdn_event("SNAPSHOT_DELETE", "INFO", f"Đã xóa bản Snapshot #{snapshot_id}")
+        return {"status": "success", "message": f"Đã xóa bản sao lưu {snapshot_id}"}
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
+
+@app.get("/api/sdn/snapshots/{snapshot_id}/download")
+def download_snapshot_file(snapshot_id: str):
+    """Tải file JSON snapshot về máy"""
+    fpath = os.path.join(BACKUP_DIR, f"{snapshot_id}.json")
+    if not os.path.exists(fpath):
+        raise HTTPException(status_code=404, detail="Không tìm thấy file snapshot")
+    return FileResponse(fpath, media_type="application/json", filename=f"{snapshot_id}.json")
+
+@app.post("/api/sdn/snapshots/{snapshot_id}/restore")
+def restore_snapshot_endpoint(snapshot_id: str):
+    """
+    1-Click Rollback: Hoàn nguyên toàn bộ cấu hình mạng về bản snapshot đã chọn!
+    """
+    fpath = os.path.join(BACKUP_DIR, f"{snapshot_id}.json")
+    if not os.path.exists(fpath):
+        raise HTTPException(status_code=404, detail="Không tìm thấy bản Snapshot để khôi phục")
+
+    try:
+        with open(fpath, "r", encoding="utf-8") as f:
+            snap_data = json.load(f)
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"Lỗi đọc file snapshot: {ex}")
+
+    # Bước 1: Dọn dẹp toàn bộ Firewall Rules hiện tại trên switch
+    for cur_fw in list(sdn_state.get("firewall_rules", [])):
+        try:
+            del_flow = {
+                "dpid": cur_fw["dpid"],
+                "priority": cur_fw.get("priority", 1000),
+                "match": cur_fw.get("match", {})
+            }
+            requests.post(f"{RYU_BASE_URL}/stats/flowentry/delete_strict", json=del_flow, timeout=0.8)
+        except Exception:
+            pass
+
+    # Bước 2: Dọn dẹp toàn bộ QoS Meters hiện tại trên switch
+    for cur_m in list(sdn_state.get("qos_meters", [])):
+        try:
+            del_flow = {
+                "dpid": cur_m["dpid"],
+                "priority": 500,
+                "match": {"dl_type": 2048}
+            }
+            if cur_m.get("src_ip"):
+                del_flow["match"]["nw_src"] = cur_m["src_ip"]
+            if cur_m.get("dst_ip"):
+                del_flow["match"]["nw_dst"] = cur_m["dst_ip"]
+            requests.post(f"{RYU_BASE_URL}/stats/flowentry/delete_strict", json=del_flow, timeout=0.8)
+            requests.post(f"{RYU_BASE_URL}/stats/meterentry/delete", json={"dpid": cur_m["dpid"], "meter_id": cur_m["meter_id"]}, timeout=0.8)
+        except Exception:
+            pass
+
+    # Bước 3: Nạp lại danh sách Firewall Rules từ Snapshot
+    restored_fw = snap_data.get("firewall_rules", [])
+    sdn_state["firewall_rules"] = list(restored_fw)
+    for fw in restored_fw:
+        try:
+            match_dict = fw.get("match")
+            if not match_dict:
+                match_dict = {"dl_type": 2048}
+                if fw.get("src_ip"):
+                    match_dict["nw_src"] = fw["src_ip"]
+                if fw.get("dst_ip"):
+                    match_dict["nw_dst"] = fw["dst_ip"]
+                p = fw.get("proto", "").upper()
+                if p == "TCP":
+                    match_dict["nw_proto"] = 6
+                elif p == "UDP":
+                    match_dict["nw_proto"] = 17
+                elif p == "ICMP":
+                    match_dict["nw_proto"] = 1
+                if fw.get("dst_port"):
+                    match_dict["tp_dst"] = fw["dst_port"]
+
+            ryu_act = []
+            if fw.get("action", "").upper() == "ALLOW":
+                ryu_act = [{"type": "OUTPUT", "port": "NORMAL"}]
+
+            requests.post(f"{RYU_BASE_URL}/stats/flowentry/add", json={
+                "dpid": fw["dpid"],
+                "priority": fw.get("priority", 1000),
+                "match": match_dict,
+                "actions": ryu_act
+            }, timeout=0.8)
+        except Exception as ex:
+            print(f"[!] Lỗi phục hồi Firewall {fw.get('id')}: {ex}")
+
+    # Bước 4: Nạp lại danh sách QoS Meters từ Snapshot
+    restored_qos = snap_data.get("qos_meters", [])
+    sdn_state["qos_meters"] = list(restored_qos)
+    for q in restored_qos:
+        try:
+            mid = q["meter_id"]
+            dpid = q["dpid"]
+            rate = q.get("rate_kbps", 1000)
+            burst = q.get("burst_size", 500)
+            src_ip = q.get("src_ip", "")
+            dst_ip = q.get("dst_ip", "")
+
+            # Tạo meter table trên Ryu
+            meter_payload = {
+                "dpid": dpid,
+                "meter_id": mid,
+                "flags": ["KBPS", "BURST", "STATS"],
+                "bands": [{"type": "DROP", "rate": rate, "burst_size": burst}]
+            }
+            requests.post(f"{RYU_BASE_URL}/stats/meterentry/add", json=meter_payload, timeout=0.8)
+
+            # Cài flow entry priority 500
+            flow_match = {"dl_type": 2048}
+            if src_ip:
+                flow_match["nw_src"] = src_ip
+            if dst_ip:
+                flow_match["nw_dst"] = dst_ip
+
+            out_port = resolve_out_port(dpid, src_ip, dst_ip)
+            actions = [
+                {"type": "METER", "meter_id": mid},
+                {"type": "OUTPUT", "port": out_port}
+            ]
+            requests.post(f"{RYU_BASE_URL}/stats/flowentry/add", json={
+                "dpid": dpid,
+                "priority": 500,
+                "match": flow_match,
+                "actions": actions
+            }, timeout=0.8)
+        except Exception as ex:
+            print(f"[!] Lỗi phục hồi QoS Meter {q.get('meter_id')}: {ex}")
+
+    record_sdn_event(
+        "SNAPSHOT_RESTORE",
+        "SUCCESS",
+        f"⚡ [1-CLICK ROLLBACK] Đã khôi phục toàn bộ cấu hình mạng về bản '{snap_data.get('name')}' ({len(restored_fw)} Firewall, {len(restored_qos)} QoS)!",
+        {"snapshot_id": snapshot_id, "name": snap_data.get("name")}
+    )
+
     return {
         "status": "success",
-        "ai_raw": "SDN Intent Engine (Local Neural Parser)",
-        "parsed": parsed_rule
+        "message": f"Đã hoàn nguyên cấu hình về bản '{snap_data.get('name')}' thành công!",
+        "restored_firewall": len(restored_fw),
+        "restored_qos": len(restored_qos)
     }
 
 if os.path.exists(WEB_DIR):

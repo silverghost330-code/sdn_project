@@ -23,3 +23,8 @@ web.log
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# SDN Snapshots
+backups/snapshots/*.json
+!backups/snapshots/.gitkeep
+
