@@ -63,39 +63,10 @@ sdn_state = {
         {"src": "s1", "src_port": 3, "dst": "s3", "dst_port": 3, "speed": "10Gbps (RAM Bus)", "status": "UP"},
         {"src": "s2", "src_port": 3, "dst": "s3", "dst_port": 4, "speed": "10Gbps (RAM Bus)", "status": "UP"}
     ],
-    "firewall_rules": [
-        {
-            "id": 1,
-            "dpid": 3,
-            "priority": 1000,
-            "src_ip": "10.0.0.2",
-            "dst_ip": "10.0.0.4",
-            "proto": "TCP",
-            "dst_port": 445,
-            "action": "DROP",
-            "description": "Bảo vệ Windows File Server: Chặn h2 gửi file qua cổng SMB 445 (Chống Ransomware)",
-            "created_at": "2026-09-19 16:00:00",
-            "hits": 84
-        }
-    ],
-    "qos_meters": [
-        {
-            "meter_id": 1,
-            "dpid": 2,
-            "rate_kbps": 2000,
-            "burst_size": 500,
-            "src_ip": "10.0.0.2",
-            "dst_ip": "10.0.0.4",
-            "target": "10.0.0.2 ➔ 10.0.0.4",
-            "description": "Giới hạn băng thông truyền file từ Client h2 đến h4 tối đa 2Mbps",
-            "created_at": "2026-09-19 16:05:00"
-        }
-    ],
+    "firewall_rules": [],
+    "qos_meters": [],
     "flows": [
-        {"table_id": 0, "priority": 65535, "match": {"eth_type": "ARP"}, "action": "NORMAL", "packets": 412, "bytes": 26368},
-        {"table_id": 0, "priority": 1000, "match": {"ipv4_src": "10.0.0.2", "ipv4_dst": "10.0.0.4", "ip_proto": 6, "tcp_dst": 445}, "action": "DROP", "packets": 84, "bytes": 5376},
-        {"table_id": 0, "priority": 10, "match": {"in_port": 1, "eth_dst": "00:00:00:00:00:03"}, "action": "OUTPUT:3", "packets": 1840, "bytes": 264960},
-        {"table_id": 0, "priority": 0, "match": "ALL", "action": "CONTROLLER:65535", "packets": 28, "bytes": 2128}
+        {"table_id": 0, "priority": 0, "match": "ALL", "action": "CONTROLLER:65535", "packets": 0, "bytes": 0}
     ]
 }
 
@@ -360,10 +331,29 @@ def resolve_out_port(dpid: int, src_ip: str = "", dst_ip: str = "") -> int:
         + h4 (10.0.0.4) -> port 2
         + Uplink tới s1 Core (dẫn tới h1, h2) -> port 3
     """
+    link_status = {f"{l['src']}-{l['dst']}": l.get("status", "UP") for l in sdn_state.get("links", [])}
+    s1_s2_up = link_status.get("s1-s2", "UP") == "UP"
+    s1_s3_up = link_status.get("s1-s3", "UP") == "UP"
+
     routing_map = {
-        1: {"10.0.0.1": 1, "10.0.0.2": 2, "10.0.0.3": 3, "10.0.0.4": 3},
-        2: {"10.0.0.1": 2, "10.0.0.2": 1, "10.0.0.3": 2, "10.0.0.4": 2},
-        3: {"10.0.0.1": 3, "10.0.0.2": 3, "10.0.0.3": 1, "10.0.0.4": 2}
+        1: {
+            "10.0.0.1": 1,
+            "10.0.0.2": 2 if s1_s2_up else 3,
+            "10.0.0.3": 3 if s1_s3_up else 2,
+            "10.0.0.4": 3 if s1_s3_up else 2
+        },
+        2: {
+            "10.0.0.1": 2 if s1_s2_up else 3,
+            "10.0.0.2": 1,
+            "10.0.0.3": 2 if (s1_s2_up and s1_s3_up) else 3,
+            "10.0.0.4": 2 if (s1_s2_up and s1_s3_up) else 3
+        },
+        3: {
+            "10.0.0.1": 3 if s1_s3_up else 4,
+            "10.0.0.2": 3 if (s1_s3_up and s1_s2_up) else 4,
+            "10.0.0.3": 1,
+            "10.0.0.4": 2
+        }
     }
 
     if dpid in routing_map and dst_ip in routing_map[dpid]:
@@ -372,9 +362,9 @@ def resolve_out_port(dpid: int, src_ip: str = "", dst_ip: str = "") -> int:
     # Nếu không có dst_ip nhưng có src_ip trên switch biên:
     if src_ip:
         if dpid == 2:
-            return 1 if src_ip != "10.0.0.2" else 2
+            return 1 if src_ip != "10.0.0.2" else (2 if s1_s2_up else 3)
         elif dpid == 3:
-            return 3 if src_ip in ["10.0.0.3", "10.0.0.4"] else 1
+            return (3 if s1_s3_up else 4) if src_ip in ["10.0.0.3", "10.0.0.4"] else 1
         elif dpid == 1:
             return 1 if src_ip == "10.0.0.1" else 3
 
@@ -424,7 +414,7 @@ def add_firewall_rule(rule: FirewallRuleCreate):
     out_port = resolve_out_port(rule.dpid, rule.src_ip, rule.dst_ip)
     ryu_actions = [] if rule.action.upper() == "DROP" else [{"type": "OUTPUT", "port": out_port}]
 
-    new_id = len(sdn_state["firewall_rules"]) + 1
+    new_id = max([r["id"] for r in sdn_state["firewall_rules"]], default=0) + 1
     new_rule = {
         "id": new_id,
         "dpid": rule.dpid,

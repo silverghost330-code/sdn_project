@@ -21,10 +21,10 @@ def create_sdn_topology():
     info("*** [2] Kết nối tới Ryu Remote Controller (Port 6653)...\n")
     c0 = net.addController('c0', controller=RemoteController, ip='127.0.0.1', port=6653)
 
-    info("*** [3] Khởi tạo các Switch Open vSwitch (Chuẩn OpenFlow 1.3)...\n")
-    s1 = net.addSwitch('s1', protocols='OpenFlow13', dpid='0000000000000001') # Core Switch
-    s2 = net.addSwitch('s2', protocols='OpenFlow13', dpid='0000000000000002') # Distribution Switch
-    s3 = net.addSwitch('s3', protocols='OpenFlow13', dpid='0000000000000003') # Server Farm Switch
+    info("*** [3] Khởi tạo các Switch Open vSwitch (Chuẩn OpenFlow 1.3 - Userspace Datapath)...\n")
+    s1 = net.addSwitch('s1', protocols='OpenFlow13', dpid='0000000000000001', datapath='user') # Core Switch
+    s2 = net.addSwitch('s2', protocols='OpenFlow13', dpid='0000000000000002', datapath='user') # Distribution Switch
+    s3 = net.addSwitch('s3', protocols='OpenFlow13', dpid='0000000000000003', datapath='user') # Server Farm Switch
 
     info("*** [4] Khởi tạo các Host ảo hóa...\n")
     # Host h1: Máy Client 1

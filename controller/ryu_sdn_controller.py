@@ -17,7 +17,33 @@ class SDNDataController(app_manager.RyuApp):
         super(SDNDataController, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
         self.datapaths = {}
+        # Quản lý động các cổng bị khóa chống Loop (mặc định khóa nhánh dự phòng s2-port3 <-> s3-port4)
+        self.blocked_ports = {(2, 3), (3, 4)}
+        self.backup_link_active = False
         self.logger.info(">>> SDN Data Controller (OpenFlow 1.3) đã sẵn sàng hoạt động! <<<")
+
+    def reset_l2_flows(self):
+        """Xóa bảng MAC đã học và các flow chuyển tiếp L2 cũ trên tất cả các datapath (giữ lại table-miss flow priority 0)"""
+        self.mac_to_port.clear()
+        for dpid, datapath in list(self.datapaths.items()):
+            try:
+                ofproto = datapath.ofproto
+                parser = datapath.ofproto_parser
+                match = parser.OFPMatch()
+                del_mod = parser.OFPFlowMod(
+                    datapath=datapath,
+                    command=ofproto.OFPFC_DELETE,
+                    out_port=ofproto.OFPP_ANY,
+                    out_group=ofproto.OFPG_ANY,
+                    match=match
+                )
+                datapath.send_msg(del_mod)
+
+                # Cài đặt lại Table-miss Flow Entry (priority 0)
+                actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
+                self.add_flow(datapath, priority=0, match=match, actions=actions)
+            except Exception as ex:
+                self.logger.error("Lỗi khi làm mới Flow trên Switch s%s: %s", dpid, ex)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -71,12 +97,12 @@ class SDNDataController(app_manager.RyuApp):
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
 
-        # Loop-Free Spanning Tree Broadcast Prevention for 3-Switch Mesh (s1 Core, s2 Dist, s3 Server Farm)
-        # Redundant mesh trunk: s2-port3 <-> s3-port4
+        # Loop-Free Spanning Tree Broadcast Prevention with Dynamic Failover
+        # Redundant mesh trunk: s2-port3 <-> s3-port4 (được quản lý động qua self.blocked_ports)
         is_broadcast_or_multicast = eth.dst == 'ff:ff:ff:ff:ff:ff' or eth.dst.startswith('01:') or dst not in self.mac_to_port[dpid]
         if is_broadcast_or_multicast:
-            if (dpid == 2 and in_port == 3) or (dpid == 3 and in_port == 4):
-                # Discard broadcast packet coming from redundant trunk link to prevent broadcast storm
+            if (dpid, in_port) in self.blocked_ports:
+                # Discard broadcast packet coming from blocked redundant trunk link to prevent broadcast storm
                 return
 
         # L2 MAC Learning
@@ -94,17 +120,18 @@ class SDNDataController(app_manager.RyuApp):
             else:
                 self.add_flow(datapath, priority=10, match=match, actions=actions, idle_timeout=60)
         else:
-            # Loop-free Spanning Tree broadcast flooding
+            # Loop-free Spanning Tree broadcast flooding (tự động mở cổng dự phòng khi Failover)
             actions = []
             if dpid == 1:
-                flood_ports = [1, 2, 3]
+                all_ports = [1, 2, 3]
             elif dpid == 2:
-                flood_ports = [1, 2]  # Port 3 is redundant trunk to s3
+                all_ports = [1, 2, 3]  # Port 3 là nhánh dự phòng sang s3
             elif dpid == 3:
-                flood_ports = [1, 2, 3]  # Port 4 is redundant trunk to s2
+                all_ports = [1, 2, 3, 4]  # Port 4 là nhánh dự phòng sang s2
             else:
-                flood_ports = [p for p in range(1, 10)]
+                all_ports = [p for p in range(1, 10)]
 
+            flood_ports = [p for p in all_ports if (dpid, p) not in self.blocked_ports]
             for p in flood_ports:
                 if p != in_port:
                     actions.append(parser.OFPActionOutput(p))
@@ -162,8 +189,24 @@ class SDNDataController(app_manager.RyuApp):
         elif reason == ofproto.OFPPR_DELETE:
             desc = f"Switch s{dpid}: Cổng {port_no} ({port_name}) đã bị xóa khỏi thiết bị"
             self.logger.warning(f"🚨 [PORT DELETE] {desc}")
+            self.blocked_ports.clear()
+            self.backup_link_active = True
+            self.reset_l2_flows()
             self.notify_backend("PORT_DELETE", "DANGER", desc, {"dpid": dpid, "port": port_no, "name": port_name})
         elif reason == ofproto.OFPPR_MODIFY:
+            if is_down:
+                # Mở khóa nhánh dự phòng s2-s3 khi phát hiện sự cố đứt cáp và xóa bảng MAC/Flow cũ
+                self.blocked_ports.clear()
+                self.backup_link_active = True
+                self.reset_l2_flows()
+                self.logger.warning("⚡ [FAILOVER] Đã mở khóa nhánh dự phòng s2-s3 và làm mới bảng MAC/Flow!")
+            else:
+                # Khôi phục khóa chống Loop trên nhánh dự phòng s2-s3 khi đường truyền UP trở lại
+                self.blocked_ports = {(2, 3), (3, 4)}
+                self.backup_link_active = False
+                self.reset_l2_flows()
+                self.logger.info("🔄 [RECOVERY] Đã khôi phục khóa chống Loop trên nhánh dự phòng s2-s3!")
+
             level = "DANGER" if is_down else "SUCCESS"
             icon = "🚨" if is_down else "🟢"
             desc = f"{icon} Switch s{dpid}: Cổng {port_no} ({port_name}) chuyển trạng thái -> {state_str}"
