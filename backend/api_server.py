@@ -663,6 +663,7 @@ def ai_copilot(req: AICopilotRequest):
         # Nếu Gemini API lỗi (ví dụ key sai / hết quota), tự động fallback sang local parser!
 
     parsed_rule = parse_sdn_intent_locally(req.prompt)
+    return {"status": "success", "ai_raw": "Local Intent Parser", "parsed": parsed_rule}
 # ==============================================================================
 # SNAPSHOT & 1-CLICK ROLLBACK MANAGEMENT ENGINE
 # ==============================================================================

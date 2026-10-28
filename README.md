@@ -7,21 +7,21 @@ Dự án xây dựng bộ điều khiển mạng định nghĩa bằng phần m�
 ## 📁 Cấu Trúc Dự Án
 
 ```
-D:\DỰ ÁN môn công nghệ mạng\
-├── scripts\
+sdn_project/
+├── scripts/
 │   ├── setup_linux_server.sh   # Cài đặt tự động Mininet, OVS, Python packages (1-click)
 │   └── start_all.sh            # Khởi động toàn bộ: Ryu + Web Dashboard + Mininet (1-click)
-├── controller\
+├── controller/
 │   ├── ryu_sdn_controller.py   # Ryu SDN Controller OpenFlow 1.3 (L2 Learning, Firewall, Meter QoS)
 │   └── mininet_topology.py     # Script tạo topo mạng ảo hóa (3 OVS Switch Mesh, 4 Host)
-├── backend\
+├── backend/
 │   ├── api_server.py           # FastAPI Northbound Gateway & REST Endpoints (bind 0.0.0.0)
 │   └── ai_engine.py            # AI SDN Intent-Based Copilot (Gemini API)
-├── web\
-│   ├── css\styles.css          # Giao diện Dark Theme chuyên nghiệp
-│   ├── js\app.js              # Logic Web Dashboard & Vẽ sơ đồ mạng Mininet realtime
+├── web/
+│   ├── css/styles.css          # Giao diện Dark Theme chuyên nghiệp
+│   ├── js/app.js              # Logic Web Dashboard & Vẽ sơ đồ mạng Mininet realtime
 │   └── index.html              # Giao diện Dashboard quản trị SDN
-├── docs\
+├── docs/
 │   ├── pnetlab_lab_guide.md    # Tài liệu tham khảo: hướng dẫn mở rộng trên PNETLab (tùy chọn)
 │   └── setup_ovs_node.sh       # Script cấu hình Open vSwitch node ngoài (tùy chọn)
 ├── run_web.py                  # Khởi động Web Dashboard (tự mở port, mở browser)

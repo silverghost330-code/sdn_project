@@ -3,11 +3,16 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
+# Virtual environments & Local Python runtimes
 venv/
 env/
 ENV/
 .venv/
+.python310/
+.python310
+
+# Environment configs
+.env
 
 # Logs
 *.log
@@ -27,4 +32,3 @@ Thumbs.db
 # SDN Snapshots
 backups/snapshots/*.json
 !backups/snapshots/.gitkeep
-
