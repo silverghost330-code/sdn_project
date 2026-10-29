@@ -7,14 +7,56 @@ và 4 Host (Client 1, Client 2, Web Server, Windows File Server/Attacker).
 Kết nối trực tiếp tới Ryu Remote Controller tại 127.0.0.1:6653.
 """
 
+import os
 import sys
 import time
+import socket
+import subprocess
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSSwitch
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 
+def is_port_open(port: int, host: str = '127.0.0.1') -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except Exception:
+        return False
+
+def ensure_services_running():
+    """Tự động khởi chạy Ryu Controller (6653) và Web Dashboard (8000) nếu người dùng chạy trực tiếp file này"""
+    project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    ryu_bin = os.path.join(project_dir, 'venv', 'bin', 'ryu-manager')
+    py_bin = os.path.join(project_dir, 'venv', 'bin', 'python')
+    ctrl_app = os.path.join(project_dir, 'controller', 'ryu_sdn_controller.py')
+    web_app = os.path.join(project_dir, 'run_web.py')
+    spawned = []
+
+    if not is_port_open(6653) and os.path.exists(ryu_bin):
+        info("*** [Auto-Start] Khởi động Ryu OpenFlow 1.3 Controller (Port 6653 & 8080)...\n")
+        ryu_log = open(os.path.join(project_dir, 'ryu.log'), 'w')
+        p_ryu = subprocess.Popen(
+            [ryu_bin, '--observe-links', ctrl_app, 'ryu.app.ofctl_rest'],
+            cwd=project_dir, stdout=ryu_log, stderr=subprocess.STDOUT
+        )
+        spawned.append(p_ryu)
+        time.sleep(2.0)
+
+    if not is_port_open(8000) and os.path.exists(py_bin):
+        info("*** [Auto-Start] Khởi động Web Dashboard & Northbound API (Port 8000)...\n")
+        web_log = open(os.path.join(project_dir, 'web.log'), 'w')
+        p_web = subprocess.Popen(
+            [py_bin, web_app],
+            cwd=project_dir, stdout=web_log, stderr=subprocess.STDOUT
+        )
+        spawned.append(p_web)
+        time.sleep(1.5)
+
+    return spawned
+
 def create_sdn_topology():
+    spawned_procs = ensure_services_running()
     info("*** [1] Khởi tạo hệ thống mạng Mininet (Auto MACs)...\n")
     net = Mininet(controller=RemoteController, switch=OVSSwitch, autoSetMacs=True)
 
@@ -51,6 +93,11 @@ def create_sdn_topology():
     info("*** [6] Khởi động mạng ảo hóa Mininet...\n")
     net.start()
 
+    # Tắt TX/RX Checksum Offloading trên các giao diện veth của Host để TCP/UDP (iperf, curl)
+    # hoạt động ổn định 100% với Open vSwitch Userspace Datapath (netdev)
+    for h in [h1, h2, h3, h4]:
+        h.cmd(f'ethtool -K {h.name}-eth0 tx off rx off > /dev/null 2>&1 || true')
+
     info("*** [7] Khởi động các dịch vụ Server tự động...\n")
     # Khởi động Web Server HTTP trên h3
     h3.cmd('python3 -m http.server 80 > /dev/null 2>&1 &')
@@ -63,8 +110,10 @@ def create_sdn_topology():
     info("\n" + "=" * 65 + "\n")
     info(" 🚀 MẠNG ẢO HÓA MININET ĐÃ SẴN SÀNG ĐIỀU KHIỂN BỞI RYU SDN!\n")
     info(" - Kiểm tra toàn mạng: gõ 'pingall'\n")
+    info(" - Test Failover:     gõ 'link s1 s2 down' -> 'pingall' -> 'link s1 s2 up'\n")
     info(" - Test Web Server:   gõ 'h1 curl http://10.0.0.3'\n")
     info(" - Test File Server:  gõ 'h1 curl http://10.0.0.4:8080'\n")
+    info(" - Test QoS (iperf):  gõ 'iperf h2 h3'\n")
     info(" - Thoát Mininet:     gõ 'exit'\n")
     info("=" * 65 + "\n\n")
 
@@ -72,6 +121,11 @@ def create_sdn_topology():
 
     info("*** Đang tắt mạng và giải phóng tài nguyên...\n")
     net.stop()
+    for p in spawned_procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     setLogLevel('info')

@@ -42,6 +42,7 @@ trap cleanup EXIT INT TERM
 echo "[1/4] Dọn dẹp trạng thái mạng cũ..."
 sudo mn -c > /dev/null 2>&1
 sudo fuser -k 6653/tcp 8080/tcp 8000/tcp > /dev/null 2>&1
+sudo rm -f "$SCRIPT_DIR/ryu.log" "$SCRIPT_DIR/web.log" > /dev/null 2>&1
 sleep 1
 
 # 2. Khởi động Ryu SDN Controller
