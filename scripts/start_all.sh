@@ -47,7 +47,7 @@ sleep 1
 
 # 2. Khởi động Ryu SDN Controller
 echo "[2/4] Đang khởi động Ryu OpenFlow 1.3 Controller (Cổng 6653 & 8080)..."
-"$RYU_BIN" --observe-links controller/ryu_sdn_controller.py ryu.app.ofctl_rest > ryu.log 2>&1 &
+"$RYU_BIN" --observe-links controller/ryu_sdn_controller.py ryu.app.ofctl_rest ryu.app.rest_topology > ryu.log 2>&1 &
 RYU_PID=$!
 sleep 2
 

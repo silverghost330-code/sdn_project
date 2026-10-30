@@ -44,6 +44,13 @@ class SDNDataController(app_manager.RyuApp):
                 # Cài đặt lại Table-miss Flow Entry (priority 0)
                 actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
                 self.add_flow(datapath, priority=0, match=match, actions=actions)
+
+                # Cài đặt lại LLDP Flow Entry (priority 65535) để bảo toàn khám phá Topology LLDP
+                lldp_match = parser.OFPMatch(
+                    eth_type=ether_types.ETH_TYPE_LLDP,
+                    eth_dst='01:80:c2:00:00:0e'
+                )
+                self.add_flow(datapath, priority=0xFFFF, match=lldp_match, actions=actions)
             except Exception as ex:
                 self.logger.error("Lỗi khi làm mới Flow trên Switch s%s: %s", dpid, ex)
 

@@ -37,7 +37,7 @@ def ensure_services_running():
         info("*** [Auto-Start] Khởi động Ryu OpenFlow 1.3 Controller (Port 6653 & 8080)...\n")
         ryu_log = open(os.path.join(project_dir, 'ryu.log'), 'w')
         p_ryu = subprocess.Popen(
-            [ryu_bin, '--observe-links', ctrl_app, 'ryu.app.ofctl_rest'],
+            [ryu_bin, '--observe-links', ctrl_app, 'ryu.app.ofctl_rest', 'ryu.app.rest_topology'],
             cwd=project_dir, stdout=ryu_log, stderr=subprocess.STDOUT
         )
         spawned.append(p_ryu)
@@ -96,7 +96,7 @@ def create_sdn_topology():
     # Tắt TX/RX Checksum Offloading trên các giao diện veth của Host để TCP/UDP (iperf, curl)
     # hoạt động ổn định 100% với Open vSwitch Userspace Datapath (netdev)
     for h in [h1, h2, h3, h4]:
-        h.cmd(f'ethtool -K {h.name}-eth0 tx off rx off > /dev/null 2>&1 || true')
+        h.cmd("ethtool -K " + h.defaultIntf().name + " tx off rx off")
 
     info("*** [7] Khởi động các dịch vụ Server tự động...\n")
     # Khởi động Web Server HTTP trên h3
@@ -117,7 +117,15 @@ def create_sdn_topology():
     info(" - Thoát Mininet:     gõ 'exit'\n")
     info("=" * 65 + "\n\n")
 
-    CLI(net)
+    if '--daemon' in sys.argv or not sys.stdin.isatty():
+        info("*** [Daemon Mode] Giữ mạng Mininet hoạt động nền (nhấn Ctrl+C hoặc kill để dừng)...\n")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    else:
+        CLI(net)
 
     info("*** Đang tắt mạng và giải phóng tài nguyên...\n")
     net.stop()

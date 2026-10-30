@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 FastAPI Northbound Gateway for SDN Controller (Mininet Linux Server Edition)
@@ -93,6 +94,7 @@ class FirewallRuleCreate(BaseModel):
 
 class QoSMeterCreate(BaseModel):
     dpid: int = Field(default=1, description="Datapath ID của Switch OVS")
+    meter_id: Optional[int] = Field(default=None, description="ID của Meter Table (tùy chọn)")
     rate_kbps: int = Field(default=1000, description="Giới hạn tốc độ tính bằng Kbps")
     burst_size: int = Field(default=500)
     src_ip: Optional[str] = Field(default="", description="IP Nguồn (để trống = Tất cả)")
@@ -106,6 +108,7 @@ class AICopilotRequest(BaseModel):
 
 last_link_states = {}
 last_switch_states = {1: "UP", 2: "UP", 3: "UP"}
+last_ryu_dpids = {1, 2, 3}
 webhook_down_switches = set()
 
 def record_sdn_event(
@@ -150,11 +153,13 @@ def record_sdn_event(
 
 def sync_live_topology():
     """
-    Truy vấn trực tiếp OpenFlow switches & portdesc từ Ryu để đồng bộ trạng thái Switch và Link UP / DOWN
+    Truy vấn trực tiếp OpenFlow switches, LLDP links, hosts & portdesc từ Ryu để đồng bộ trạng thái Switch và Link UP / DOWN
     """
-    global last_link_states, last_switch_states, webhook_down_switches
+    global last_link_states, last_switch_states, last_ryu_dpids, webhook_down_switches
     port_states = {}
     ryu_active_dpids = None
+    lldp_links_raw = []
+    discovered_hosts_raw = []
 
     try:
         r_sw = requests.get(f"{RYU_BASE_URL}/stats/switches", timeout=0.4)
@@ -163,9 +168,29 @@ def sync_live_topology():
     except Exception:
         pass
 
-    if ryu_active_dpids is not None:
-        # Nếu Ryu thực tế báo một switch không nằm trong ryu_active_dpids -> chắc chắn DOWN
-        # Kết hợp với webhook_down_switches để hỗ trợ cả khi gọi webhook mô phỏng
+    try:
+        r_links = requests.get(f"{RYU_BASE_URL}/v1.0/topology/links", timeout=0.4)
+        if r_links.status_code == 200 and isinstance(r_links.json(), list):
+            lldp_links_raw = r_links.json()
+    except Exception:
+        pass
+
+    try:
+        r_hosts = requests.get(f"{RYU_BASE_URL}/v1.0/topology/hosts", timeout=0.4)
+        if r_hosts.status_code == 200 and isinstance(r_hosts.json(), list):
+            discovered_hosts_raw = r_hosts.json()
+    except Exception:
+        pass
+
+    sdn_state["lldp_discovered_links"] = lldp_links_raw
+    sdn_state["discovered_hosts"] = discovered_hosts_raw
+
+    if ryu_active_dpids:
+        # Nếu một switch vừa kết nối lại trên Ryu (không có trong last_ryu_dpids nhưng có trong ryu_active_dpids)
+        newly_up = ryu_active_dpids - last_ryu_dpids
+        for dpid_up in newly_up:
+            webhook_down_switches.discard(dpid_up)
+        last_ryu_dpids = set(ryu_active_dpids)
         active_dpids = ryu_active_dpids - webhook_down_switches
     else:
         active_dpids = {1, 2, 3} - webhook_down_switches
@@ -408,11 +433,13 @@ def get_status():
 def get_topology():
     sync_live_topology()
     return {
-        "platform": "Mininet Topology",
+        "platform": "Mininet Topology (LLDP Enabled)",
         "switches": sdn_state["switches"],
         "nodes": sdn_state["switches"],
         "hosts": sdn_state["hosts"],
-        "links": sdn_state["links"]
+        "links": sdn_state["links"],
+        "lldp_discovered_links": sdn_state.get("lldp_discovered_links", []),
+        "discovered_hosts": sdn_state.get("discovered_hosts", [])
     }
 
 @app.get("/api/sdn/events")
@@ -657,7 +684,7 @@ def get_qos_meters():
 
 @app.post("/api/sdn/qos")
 def add_qos_meter(meter: QoSMeterCreate):
-    new_id = max([m["meter_id"] for m in sdn_state["qos_meters"]], default=0) + 1
+    new_id = meter.meter_id if meter.meter_id is not None else (max([m["meter_id"] for m in sdn_state["qos_meters"]], default=0) + 1)
     src = (meter.src_ip or "").strip()
     dst = (meter.dst_ip or "").strip()
 
@@ -671,6 +698,12 @@ def add_qos_meter(meter: QoSMeterCreate):
             src = ips[0]
 
     target_display = f"{src or '*'} ➔ {dst or '*'}" if (src or dst) else (meter.target or "Tất cả traffic")
+
+    # Nếu trùng meter_id trên cùng dpid thì cập nhật bản ghi cũ
+    sdn_state["qos_meters"] = [
+        m for m in sdn_state["qos_meters"]
+        if not (m["meter_id"] == new_id and m["dpid"] == meter.dpid)
+    ]
 
     new_meter = {
         "meter_id": new_id,
@@ -687,6 +720,13 @@ def add_qos_meter(meter: QoSMeterCreate):
 
     # Đẩy Meter Table và Flow Instruction xuống Ryu
     try:
+        # Xóa meter_id cũ nếu trùng để tránh lỗi OFPMFC_METER_EXISTS khi đổi mức băng thông nhiều lần
+        requests.post(
+            f"{RYU_BASE_URL}/stats/meterentry/delete",
+            json={"dpid": meter.dpid, "meter_id": new_id},
+            timeout=1.0
+        )
+
         meter_req = {
             "dpid": meter.dpid,
             "flags": ["KBPS", "BURST", "STATS"],
