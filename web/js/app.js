@@ -132,31 +132,53 @@ function drawTopology() {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Tra cứu trạng thái từng Switch từ topoData.switches (hoặc topoData.nodes)
+    const switchStatusMap = {};
+    const swList = topoData.switches || topoData.nodes || [];
+    swList.forEach(sw => {
+        const dpidNum = sw.dpid ? parseInt(sw.dpid, 16) : null;
+        const swKey = sw.id || (dpidNum ? `s${dpidNum}` : null);
+        if (swKey) {
+            switchStatusMap[swKey] = sw;
+        }
+    });
+
     // Mininet Layout: 3 Switches in Mesh + 4 Hosts
     const coords = {
-        's1': { x: canvas.width * 0.32, y: 160, type: 'switch', label: 's1 (Core Switch)' },
-        's2': { x: canvas.width * 0.68, y: 160, type: 'switch', label: 's2 (Distribution)' },
-        's3': { x: canvas.width * 0.5,  y: 290, type: 'switch', label: 's3 (Server Farm)' },
+        's1': { x: canvas.width * 0.32, y: 160, type: 'switch', label: 's1 (Core Switch)', status: switchStatusMap['s1']?.status || 'UP', online: switchStatusMap['s1']?.online !== false },
+        's2': { x: canvas.width * 0.68, y: 160, type: 'switch', label: 's2 (Distribution)', status: switchStatusMap['s2']?.status || 'UP', online: switchStatusMap['s2']?.online !== false },
+        's3': { x: canvas.width * 0.5,  y: 290, type: 'switch', label: 's3 (Server Farm)', status: switchStatusMap['s3']?.status || 'UP', online: switchStatusMap['s3']?.online !== false },
         'h1': { x: canvas.width * 0.15, y: 160, type: 'host', label: 'h1 (Client 10.0.0.1)' },
         'h2': { x: canvas.width * 0.85, y: 160, type: 'host', label: 'h2 (Client 10.0.0.2)' },
         'h3': { x: canvas.width * 0.35, y: 440, type: 'host', label: 'h3 (Web Server :80)' },
         'h4': { x: canvas.width * 0.65, y: 440, type: 'host', label: 'h4 (Win File Server :445)' }
     };
 
+    const anyPrimaryDown = topoData.links.some(
+        l => ((l.src === 's1' || l.dst === 's1') && l.status === 'DOWN')
+    ) || (coords['s1'].status === 'DOWN' || coords['s1'].online === false);
+
     // Draw Data Plane Trunk Links between Switches
     topoData.links.forEach(link => {
         const p1 = coords[link.src];
         const p2 = coords[link.dst];
         if (p1 && p2) {
-            const isDown = (link.status === 'DOWN');
+            const isDown = (link.status === 'DOWN') || (p1.status === 'DOWN' || p1.online === false) || (p2.status === 'DOWN' || p2.online === false);
+            const isBackupLink = (link.src === 's2' && link.dst === 's3') || (link.src === 's3' && link.dst === 's2');
+            const isBackupActive = isBackupLink && !isDown && (link.role === 'ACTIVE' || link.status === 'ACTIVE' || anyPrimaryDown);
+
             ctx.beginPath();
             ctx.moveTo(p1.x, p1.y);
             ctx.lineTo(p2.x, p2.y);
 
             if (isDown) {
-                ctx.setLineDash([8, 6]);
+                ctx.setLineDash([6, 4]);
                 ctx.lineWidth = 4;
                 ctx.strokeStyle = '#ef4444';
+            } else if (isBackupActive) {
+                ctx.setLineDash([]);
+                ctx.lineWidth = 4;
+                ctx.strokeStyle = '#10b981';
             } else {
                 ctx.setLineDash([]);
                 ctx.lineWidth = 3;
@@ -185,6 +207,21 @@ function drawTopology() {
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.fillText('⚠️ LINK DOWN', midX, midY);
+            } else if (isBackupActive) {
+                // Active Failover Green Indicator on s2-s3
+                ctx.fillStyle = '#064e3b';
+                ctx.strokeStyle = '#10b981';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.roundRect ? ctx.roundRect(midX - 52, midY - 11, 104, 22, 5) : ctx.rect(midX - 52, midY - 11, 104, 22);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#ecfdf5';
+                ctx.font = 'bold 10px Inter, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('⚡ FAILOVER UP', midX, midY);
             } else {
                 // Soft blue indicator
                 ctx.fillStyle = '#0f172a';
@@ -206,16 +243,25 @@ function drawTopology() {
     });
 
     // Draw Access Links (Host to Switch)
-    ctx.lineWidth = 2;
     topoData.hosts.forEach(host => {
         const hp = coords[host.id];
         const sp = coords[host.switch];
         if (hp && sp) {
+            const isHostLinkDown = (host.status === 'DOWN') || (sp.status === 'DOWN' || sp.online === false);
             ctx.beginPath();
             ctx.moveTo(hp.x, hp.y);
             ctx.lineTo(sp.x, sp.y);
-            ctx.strokeStyle = '#64748b';
+            if (isHostLinkDown) {
+                ctx.setLineDash([6, 4]);
+                ctx.lineWidth = 2.5;
+                ctx.strokeStyle = '#ef4444';
+            } else {
+                ctx.setLineDash([]);
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#64748b';
+            }
             ctx.stroke();
+            ctx.setLineDash([]);
         }
     });
 
@@ -224,17 +270,24 @@ function drawTopology() {
         const node = coords[key];
         ctx.beginPath();
         if (node.type === 'switch') {
+            const isSwDown = (node.status === 'DOWN' || node.online === false);
             ctx.arc(node.x, node.y, 24, 0, 2 * Math.PI);
-            ctx.fillStyle = '#1e3a8a';
+            ctx.fillStyle = isSwDown ? 'rgba(239, 68, 68, 0.25)' : '#1e3a8a';
             ctx.fill();
             ctx.lineWidth = 3;
-            ctx.strokeStyle = '#60a5fa';
+            ctx.strokeStyle = isSwDown ? '#ef4444' : '#60a5fa';
             ctx.stroke();
 
-            ctx.fillStyle = '#f8fafc';
+            ctx.fillStyle = isSwDown ? '#ef4444' : '#f8fafc';
             ctx.font = 'bold 12px Inter, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText(node.label, node.x, node.y + 38);
+            const displayLabel = isSwDown ? `${key} [DOWN]` : node.label;
+            ctx.fillText(displayLabel, node.x, node.y + 38);
+            if (isSwDown) {
+                ctx.font = 'bold 10px Inter, sans-serif';
+                ctx.fillStyle = '#fca5a5';
+                ctx.fillText('[OFFLINE]', node.x, node.y + 52);
+            }
         } else {
             ctx.rect(node.x - 22, node.y - 14, 44, 28);
             ctx.fillStyle = key === 'h3' ? '#065f46' : (key === 'h4' ? '#1e3a8a' : '#334155');
@@ -250,6 +303,7 @@ function drawTopology() {
         }
     });
 }
+const updateTopology = drawTopology;
 
 // SDN Events & Network State Change Handlers
 async function fetchSDNEvents() {

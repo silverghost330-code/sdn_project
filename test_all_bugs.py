@@ -127,17 +127,153 @@ def test_bug_4_userspace_meter():
     print("[PASS] LỖI 4: Cả 3 Switch OVS (s1, s2, s3) đã cấu hình datapath='user' hỗ trợ đầy đủ OpenFlow 1.3 Meter Table.")
 
 
+def test_bug_5_switch_stop_start():
+    from controller.ryu_sdn_controller import SDNDataController, MAIN_DISPATCHER, DEAD_DISPATCHER
+    from backend.api_server import EventWebhookRequest, receive_event_webhook, get_topology, get_events
+
+    ctrl = SDNDataController()
+
+    class DummyOfproto:
+        OFPFC_DELETE = 3
+        OFPP_ANY = 0xffffffff
+        OFPG_ANY = 0xffffffff
+        OFPP_CONTROLLER = 0xfffffffd
+        OFPCML_NO_BUFFER = 0xffff
+        OFPIT_APPLY_ACTIONS = 4
+        OFP_NO_BUFFER = 0xffffffff
+
+    class DummyParser:
+        def OFPMatch(self, **kwargs):
+            return kwargs
+
+        def OFPFlowMod(self, **kwargs):
+            return kwargs
+
+        def OFPActionOutput(self, port, max_len=0):
+            return ("OUTPUT", port)
+
+        def OFPInstructionActions(self, type_, actions):
+            return (type_, actions)
+
+        def OFPPacketOut(self, **kwargs):
+            return kwargs
+
+    class DummyDP:
+        ofproto = DummyOfproto()
+        ofproto_parser = DummyParser()
+
+        def __init__(self, dpid):
+            self.id = dpid
+            self.sent_msgs = []
+
+        def send_msg(self, msg):
+            self.sent_msgs.append(msg)
+
+    class DummyStateEv:
+        def __init__(self, datapath, state):
+            self.datapath = datapath
+            self.state = state
+
+    dp1, dp2, dp3 = DummyDP(1), DummyDP(2), DummyDP(3)
+
+    # 1. Khởi tạo cả 3 switch (s1, s2, s3) ở trạng thái UP (MAIN_DISPATCHER)
+    for dp in (dp1, dp2, dp3):
+        ctrl.state_change_handler(DummyStateEv(dp, MAIN_DISPATCHER))
+    assert set(ctrl.datapaths.keys()) == {1, 2, 3}, "3 switch chưa được đăng ký vào ctrl.datapaths"
+    assert ctrl.blocked_ports == {(2, 3), (3, 4)} and not ctrl.backup_link_active, (
+        "Khóa chống Loop chưa bật khi đủ 3 switch UP"
+    )
+
+    # 2. Giả lập tắt switch s1 (switch s1 stop -> DEAD_DISPATCHER)
+    ctrl.mac_to_port = {1: {"00:00:00:00:00:01": 1}, 2: {"00:00:00:00:00:02": 1}, 3: {"00:00:00:00:00:03": 1}}
+    dp2.sent_msgs.clear()
+    dp3.sent_msgs.clear()
+    ctrl.state_change_handler(DummyStateEv(dp1, DEAD_DISPATCHER))
+
+    assert 1 not in ctrl.datapaths, "Switch s1 chưa bị xóa khỏi self.datapaths khi DEAD_DISPATCHER"
+    assert len(ctrl.blocked_ports) == 0 and ctrl.backup_link_active is True, (
+        "Nhánh dự phòng s2-s3 chưa được mở khóa khi s1 bị stop"
+    )
+    assert any(m.get("command") == DummyOfproto.OFPFC_DELETE for m in dp2.sent_msgs), (
+        "Chưa xóa Flow L2 cũ trên s2 khi s1 bị stop"
+    )
+    assert any(m.get("command") == DummyOfproto.OFPFC_DELETE for m in dp3.sent_msgs), (
+        "Chưa xóa Flow L2 cũ trên s3 khi s1 bị stop"
+    )
+
+    # 3. Kiểm tra chuyển tiếp gói tin giữa h2 (trên s2) và h3 (trên s3) qua nhánh dự phòng s2-port3 <-> s3-port4
+    from ryu.lib.packet import packet, ethernet
+    pkt = packet.Packet()
+    pkt.add_protocol(ethernet.ethernet(dst="ff:ff:ff:ff:ff:ff", src="00:00:00:00:00:02", ethertype=0x0806))
+    pkt.serialize()
+
+    class DummyPktMsg:
+        def __init__(self, dp, in_port, data):
+            self.datapath = dp
+            self.match = {"in_port": in_port}
+            self.data = data
+            self.buffer_id = DummyOfproto.OFP_NO_BUFFER
+
+    class DummyPktEv:
+        def __init__(self, msg):
+            self.msg = msg
+
+    dp2.sent_msgs.clear()
+    ctrl.packet_in_handler(DummyPktEv(DummyPktMsg(dp2, 1, pkt.data)))
+    assert len(dp2.sent_msgs) == 1 and ("OUTPUT", 3) in dp2.sent_msgs[0]["actions"], (
+        "s2 không flood gói ARP ra port 3 (nhánh dự phòng sang s3)"
+    )
+
+    dp3.sent_msgs.clear()
+    ctrl.packet_in_handler(DummyPktEv(DummyPktMsg(dp3, 4, pkt.data)))
+    assert len(dp3.sent_msgs) == 1 and ("OUTPUT", 1) in dp3.sent_msgs[0]["actions"], (
+        "s3 chặn mất gói tin đến từ port 4 (nhánh dự phòng từ s2) thay vì chuyển tới h3 (port 1)"
+    )
+
+    # 4. Kiểm tra Webhook SWITCH_DOWN & API /api/sdn/topology, /api/sdn/events
+    receive_event_webhook(EventWebhookRequest(
+        type="SWITCH_CHANGE", dpid=1, port_no=0, reason="SWITCH_DOWN"
+    ))
+    topo = get_topology()
+    sw_map = {int(s["dpid"], 16): s for s in topo["switches"]}
+    link_map = {f"{l['src']}-{l['dst']}": l for l in topo["links"]}
+    events = get_events(limit=10)
+
+    assert sw_map[1]["status"] == "DOWN" and sw_map[1]["online"] is False, f"Switch s1 chưa chuyển sang DOWN: {sw_map[1]}"
+    assert link_map["s1-s2"]["status"] == "DOWN" and link_map["s1-s3"]["status"] == "DOWN", (
+        f"Các link nối với s1 chưa chuyển sang DOWN: {link_map}"
+    )
+    assert link_map["s2-s3"]["status"] == "UP", f"Nhánh dự phòng s2-s3 không ở trạng thái UP: {link_map['s2-s3']}"
+    assert any(e.get("reason") == "SWITCH_DOWN" and e.get("dpid") == 1 for e in events), (
+        "Không tìm thấy bản ghi sự kiện SWITCH_DOWN cho s1 trong /api/sdn/events"
+    )
+
+    # 5. Khôi phục s1 (switch s1 start -> MAIN_DISPATCHER & SWITCH_UP)
+    ctrl.state_change_handler(DummyStateEv(dp1, MAIN_DISPATCHER))
+    assert ctrl.blocked_ports == {(2, 3), (3, 4)} and not ctrl.backup_link_active, (
+        "Chưa khôi phục khóa chống Loop khi s1 kết nối trở lại"
+    )
+    receive_event_webhook(EventWebhookRequest(
+        type="SWITCH_CHANGE", dpid=1, port_no=0, reason="SWITCH_UP"
+    ))
+    topo_up = get_topology()
+    sw_map_up = {int(s["dpid"], 16): s for s in topo_up["switches"]}
+    assert sw_map_up[1]["status"] == "UP" and sw_map_up[1]["online"] is True, "Switch s1 chưa khôi phục UP"
+    print("[PASS] LỖI 5: Xử lý sự cố tắt/bật Switch (switch sX stop/start), Fast Failover s2-s3 & đồng bộ Topology/Events hoạt động chính xác.")
+
+
 if __name__ == "__main__":
     print("=" * 72)
-    print(" 🔍 ĐANG CHẠY KIỂM THỬ TỰ ĐỘNG 4 LỖI KỸ THUẬT SDN PROJECT")
+    print(" 🔍 ĐANG CHẠY KIỂM THỬ TỰ ĐỘNG HỆ THỐNG SDN PROJECT")
     print("=" * 72)
     try:
         test_bug_1_ai_copilot()
         test_bug_2_dynamic_failover()
         test_bug_3_state_sync()
         test_bug_4_userspace_meter()
+        test_bug_5_switch_stop_start()
         print("=" * 72)
-        print(" ✅ TẤT CẢ 4 BÀI TEST ĐỀU ĐẠT [PASS] (4/4)! HỆ THỐNG HOẠT ĐỘNG HOÀN HẢO!")
+        print(" ✅ TẤT CẢ 5 BÀI TEST ĐỀU ĐẠT [PASS] (5/5)! HỆ THỐNG HOẠT ĐỘNG HOÀN HẢO!")
         print("=" * 72)
     except AssertionError as e:
         print(f" ❌ [FAIL] Kiểm thử thất bại: {e}")

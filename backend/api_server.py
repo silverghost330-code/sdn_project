@@ -44,30 +44,42 @@ app.add_middleware(
 RYU_BASE_URL = os.environ.get("RYU_BASE_URL", "http://127.0.0.1:8080")
 
 # Trạng thái mạng ảo hóa Mininet
+sdn_events = [
+    {
+        "id": 1,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "type": "SYSTEM",
+        "level": "SUCCESS",
+        "message": "SDN Controller & Northbound Gateway đã sẵn sàng giám sát",
+        "details": {"mode": "Mininet Mesh Topology"}
+    }
+]
+
 sdn_state = {
     "environment": "Mininet Network Namespaces (Linux Server)",
     "controller_url": "127.0.0.1:6653",
     "switches": [
-        {"dpid": "0000000000000001", "name": "s1 (Core Switch)", "ports": [1, 2, 3], "status": "ACTIVE", "flow_count": 5},
-        {"dpid": "0000000000000002", "name": "s2 (Distribution)", "ports": [1, 2, 3], "status": "ACTIVE", "flow_count": 4},
-        {"dpid": "0000000000000003", "name": "s3 (Server Farm)", "ports": [1, 2, 3, 4], "status": "ACTIVE", "flow_count": 5}
+        {"id": "s1", "dpid": "0000000000000001", "name": "s1 (Core Switch)", "ports": [1, 2, 3], "status": "UP", "online": True, "flow_count": 5},
+        {"id": "s2", "dpid": "0000000000000002", "name": "s2 (Distribution)", "ports": [1, 2, 3], "status": "UP", "online": True, "flow_count": 4},
+        {"id": "s3", "dpid": "0000000000000003", "name": "s3 (Server Farm)", "ports": [1, 2, 3, 4], "status": "UP", "online": True, "flow_count": 5}
     ],
     "hosts": [
-        {"id": "h1", "ip": "10.0.0.1", "mac": "00:00:00:00:00:01", "switch": "s1", "port": 1, "name": "Host h1 (Client PC 1)"},
-        {"id": "h2", "ip": "10.0.0.2", "mac": "00:00:00:00:00:02", "switch": "s2", "port": 1, "name": "Host h2 (Client PC 2)"},
-        {"id": "h3", "ip": "10.0.0.3", "mac": "00:00:00:00:00:03", "switch": "s3", "port": 1, "name": "Host h3 (Web Server HTTP :80)"},
-        {"id": "h4", "ip": "10.0.0.4", "mac": "00:00:00:00:00:04", "switch": "s3", "port": 2, "name": "Host h4 (Windows File Server :445/:8080)"}
+        {"id": "h1", "ip": "10.0.0.1", "mac": "00:00:00:00:00:01", "switch": "s1", "port": 1, "name": "Host h1 (Client PC 1)", "status": "UP"},
+        {"id": "h2", "ip": "10.0.0.2", "mac": "00:00:00:00:00:02", "switch": "s2", "port": 1, "name": "Host h2 (Client PC 2)", "status": "UP"},
+        {"id": "h3", "ip": "10.0.0.3", "mac": "00:00:00:00:00:03", "switch": "s3", "port": 1, "name": "Host h3 (Web Server HTTP :80)", "status": "UP"},
+        {"id": "h4", "ip": "10.0.0.4", "mac": "00:00:00:00:00:04", "switch": "s3", "port": 2, "name": "Host h4 (Windows File Server :445/:8080)", "status": "UP"}
     ],
     "links": [
-        {"src": "s1", "src_port": 2, "dst": "s2", "dst_port": 2, "speed": "10Gbps (RAM Bus)", "status": "UP"},
-        {"src": "s1", "src_port": 3, "dst": "s3", "dst_port": 3, "speed": "10Gbps (RAM Bus)", "status": "UP"},
-        {"src": "s2", "src_port": 3, "dst": "s3", "dst_port": 4, "speed": "10Gbps (RAM Bus)", "status": "UP"}
+        {"src": "s1", "src_port": 2, "dst": "s2", "dst_port": 2, "speed": "10Gbps (RAM Bus)", "status": "UP", "role": "PRIMARY"},
+        {"src": "s1", "src_port": 3, "dst": "s3", "dst_port": 3, "speed": "10Gbps (RAM Bus)", "status": "UP", "role": "PRIMARY"},
+        {"src": "s2", "src_port": 3, "dst": "s3", "dst_port": 4, "speed": "10Gbps (RAM Bus)", "status": "UP", "role": "STANDBY"}
     ],
     "firewall_rules": [],
     "qos_meters": [],
     "flows": [
         {"table_id": 0, "priority": 0, "match": "ALL", "action": "CONTROLLER:65535", "packets": 0, "bytes": 0}
-    ]
+    ],
+    "events": sdn_events
 }
 
 class FirewallRuleCreate(BaseModel):
@@ -92,21 +104,25 @@ class AICopilotRequest(BaseModel):
     prompt: str
     api_key: Optional[str] = ""
 
-sdn_events = [
-    {
-        "id": 1,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "type": "SYSTEM",
-        "level": "SUCCESS",
-        "message": "SDN Controller & Northbound Gateway đã sẵn sàng giám sát",
-        "details": {"mode": "Mininet Mesh Topology"}
-    }
-]
 last_link_states = {}
+last_switch_states = {1: "UP", 2: "UP", 3: "UP"}
+webhook_down_switches = set()
 
-def record_sdn_event(event_type: str, level: str, message: str, details: Optional[Dict[str, Any]] = None):
+def record_sdn_event(
+    event_type: str,
+    level: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+    reason: Optional[str] = None,
+    dpid: Optional[int] = None
+):
     new_id = (sdn_events[0]["id"] + 1) if sdn_events else 1
-    d = details or {}
+    d = dict(details or {})
+    if dpid is not None and "dpid" not in d:
+        d["dpid"] = dpid
+    if reason is not None and "reason" not in d:
+        d["reason"] = reason
+
     sw = None
     if "dpid" in d:
         sw = f"s{d['dpid']}"
@@ -119,6 +135,8 @@ def record_sdn_event(event_type: str, level: str, message: str, details: Optiona
         "id": new_id,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "type": event_type,
+        "reason": reason or d.get("reason") or event_type,
+        "dpid": dpid if dpid is not None else d.get("dpid"),
         "level": level.upper(),  # SUCCESS, INFO, WARNING, DANGER
         "message": message,
         "detail": message,
@@ -132,13 +150,56 @@ def record_sdn_event(event_type: str, level: str, message: str, details: Optiona
 
 def sync_live_topology():
     """
-    Truy vấn trực tiếp OpenFlow portdesc từ Ryu để phát hiện sự thay đổi link status UP / DOWN
+    Truy vấn trực tiếp OpenFlow switches & portdesc từ Ryu để đồng bộ trạng thái Switch và Link UP / DOWN
     """
-    global last_link_states
+    global last_link_states, last_switch_states, webhook_down_switches
     port_states = {}
+    ryu_active_dpids = None
 
     try:
-        for dpid in [1, 2, 3]:
+        r_sw = requests.get(f"{RYU_BASE_URL}/stats/switches", timeout=0.4)
+        if r_sw.status_code == 200 and isinstance(r_sw.json(), list):
+            ryu_active_dpids = set(int(x) for x in r_sw.json())
+    except Exception:
+        pass
+
+    if ryu_active_dpids is not None:
+        # Nếu Ryu thực tế báo một switch không nằm trong ryu_active_dpids -> chắc chắn DOWN
+        # Kết hợp với webhook_down_switches để hỗ trợ cả khi gọi webhook mô phỏng
+        active_dpids = ryu_active_dpids - webhook_down_switches
+    else:
+        active_dpids = {1, 2, 3} - webhook_down_switches
+
+    # Cập nhật trạng thái từng Switch trong sdn_state["switches"]
+    for sw in sdn_state["switches"]:
+        sw_dpid_int = int(sw["dpid"], 16)
+        is_sw_up = sw_dpid_int in active_dpids
+        new_sw_status = "UP" if is_sw_up else "DOWN"
+        sw["status"] = new_sw_status
+        sw["online"] = is_sw_up
+
+        old_sw_status = last_switch_states.get(sw_dpid_int, "UP")
+        if old_sw_status != new_sw_status:
+            last_switch_states[sw_dpid_int] = new_sw_status
+            if new_sw_status == "DOWN":
+                record_sdn_event(
+                    "SWITCH_CHANGE", "DANGER",
+                    f"🚨 [SWITCH OFFLINE] Switch s{sw_dpid_int} ({sw['name']}) đã mất kết nối OpenFlow (SWITCH_DOWN)! Đã kích hoạt Failover nhánh dự phòng.",
+                    {"dpid": sw_dpid_int, "status": "DOWN", "reason": "SWITCH_DOWN"},
+                    reason="SWITCH_DOWN",
+                    dpid=sw_dpid_int
+                )
+            else:
+                record_sdn_event(
+                    "SWITCH_CHANGE", "SUCCESS",
+                    f"🟢 [SWITCH ONLINE] Switch s{sw_dpid_int} ({sw['name']}) đã kết nối hoạt động trở lại (SWITCH_UP)!",
+                    {"dpid": sw_dpid_int, "status": "UP", "reason": "SWITCH_UP"},
+                    reason="SWITCH_UP",
+                    dpid=sw_dpid_int
+                )
+
+    try:
+        for dpid in active_dpids:
             r = requests.get(f"{RYU_BASE_URL}/stats/portdesc/{dpid}", timeout=0.4)
             if r.status_code == 200:
                 ports = r.json().get(str(dpid), [])
@@ -158,9 +219,11 @@ def sync_live_topology():
         src_p = link["src_port"]
         dst_p = link["dst_port"]
 
+        # Bất kỳ link nào có src hoặc dst nối vào switch đang DOWN thì buộc phải có status: "DOWN"
+        sw_down = (src_id not in active_dpids) or (dst_id not in active_dpids)
         src_down = port_states.get((src_id, src_p), False)
         dst_down = port_states.get((dst_id, dst_p), False)
-        link_down = src_down or dst_down
+        link_down = sw_down or src_down or dst_down
         new_status = "DOWN" if link_down else "UP"
 
         link_key = f"{link['src']}-{link['dst']}"
@@ -184,10 +247,24 @@ def sync_live_topology():
         else:
             link["status"] = new_status
 
+    # Cập nhật vai trò nhánh dự phòng s2-s3 (ACTIVE khi s1 hoặc s1-s2/s1-s3 bị DOWN, STANDBY khi cả 3 link đều UP)
+    link_map = {f"{l['src']}-{l['dst']}": l for l in sdn_state["links"]}
+    s1_s2_up = link_map.get("s1-s2", {}).get("status") == "UP"
+    s1_s3_up = link_map.get("s1-s3", {}).get("status") == "UP"
+    s2_s3 = link_map.get("s2-s3")
+    if s2_s3:
+        if s2_s3["status"] == "UP":
+            if not (s1_s2_up and s1_s3_up) or (1 not in active_dpids):
+                s2_s3["role"] = "ACTIVE"
+            else:
+                s2_s3["role"] = "STANDBY"
+        else:
+            s2_s3["role"] = "DOWN"
+
     for host in sdn_state["hosts"]:
         sw_id = sw_dpid_map.get(host["switch"])
         p_no = host["port"]
-        h_down = port_states.get((sw_id, p_no), False)
+        h_down = (sw_id not in active_dpids) or port_states.get((sw_id, p_no), False)
         new_h_status = "DOWN" if h_down else "UP"
         h_key = f"{host['id']}-{host['switch']}"
         old_h_status = last_link_states.get(h_key, "UP")
@@ -206,6 +283,98 @@ class EventWebhookRequest(BaseModel):
     level: str = "INFO"
     message: str = ""
     details: Optional[Dict[str, Any]] = None
+    dpid: Optional[int] = None
+    port_no: Optional[int] = None
+    reason: Optional[str] = None
+
+def handle_switch_webhook(req: EventWebhookRequest):
+    """Xử lý đồng bộ tức thời khi nhận Webhook SWITCH_DOWN / SWITCH_UP từ Ryu Controller"""
+    global webhook_down_switches, last_switch_states, last_link_states
+    dpid = req.dpid
+    if dpid is None and req.details:
+        dpid = req.details.get("dpid")
+    reason = req.reason or (req.details.get("reason") if req.details else None)
+
+    if reason == "SWITCH_DOWN" and dpid in (1, 2, 3):
+        webhook_down_switches.add(dpid)
+        last_switch_states[dpid] = "DOWN"
+
+        # Cập nhật trạng thái Switch
+        for sw in sdn_state["switches"]:
+            if int(sw["dpid"], 16) == dpid:
+                sw["status"] = "DOWN"
+                sw["online"] = False
+
+        # Cập nhật trạng thái các đường link nối với switch dpid
+        sw_name = f"s{dpid}"
+        for link in sdn_state["links"]:
+            if link["src"] == sw_name or link["dst"] == sw_name:
+                link["status"] = "DOWN"
+                last_link_states[f"{link['src']}-{link['dst']}"] = "DOWN"
+            elif dpid == 1 and link["src"] == "s2" and link["dst"] == "s3":
+                # Nếu s1 bị SWITCH_DOWN và s2, s3 còn sống: chuyển s2-s3 sang UP / ACTIVE
+                if 2 not in webhook_down_switches and 3 not in webhook_down_switches:
+                    link["status"] = "UP"
+                    link["role"] = "ACTIVE"
+                    last_link_states["s2-s3"] = "UP"
+
+        # Cập nhật trạng thái các host nối với switch dpid (h1-s1, h2-s2, h3-s3, h4-s3)
+        for host in sdn_state["hosts"]:
+            if host["switch"] == sw_name:
+                host["status"] = "DOWN"
+                last_link_states[f"{host['id']}-{host['switch']}"] = "DOWN"
+
+        msg = req.message or f"🚨 [SWITCH DOWN] Switch s{dpid} đã dừng hoạt động! Đã cô lập các link của s{dpid} và mở khóa nhánh dự phòng."
+        return record_sdn_event(
+            req.type or "SWITCH_CHANGE",
+            "DANGER",
+            msg,
+            {"dpid": dpid, "port_no": req.port_no or 0, "reason": "SWITCH_DOWN"},
+            reason="SWITCH_DOWN",
+            dpid=dpid
+        )
+
+    elif reason == "SWITCH_UP" and dpid in (1, 2, 3):
+        webhook_down_switches.discard(dpid)
+        last_switch_states[dpid] = "UP"
+
+        for sw in sdn_state["switches"]:
+            if int(sw["dpid"], 16) == dpid:
+                sw["status"] = "UP"
+                sw["online"] = True
+
+        sw_name = f"s{dpid}"
+        sw_dpid_map = {"s1": 1, "s2": 2, "s3": 3}
+        for link in sdn_state["links"]:
+            if link["src"] == sw_name or link["dst"] == sw_name:
+                peer_name = link["dst"] if link["src"] == sw_name else link["src"]
+                peer_dpid = sw_dpid_map.get(peer_name)
+                if peer_dpid not in webhook_down_switches:
+                    link["status"] = "UP"
+                    last_link_states[f"{link['src']}-{link['dst']}"] = "UP"
+
+        if not webhook_down_switches:
+            for link in sdn_state["links"]:
+                if link["src"] == "s2" and link["dst"] == "s3":
+                    link["status"] = "UP"
+                    link["role"] = "STANDBY"
+
+        for host in sdn_state["hosts"]:
+            if host["switch"] == sw_name:
+                host["status"] = "UP"
+                last_link_states[f"{host['id']}-{host['switch']}"] = "UP"
+
+        msg = req.message or f"🟢 [SWITCH UP] Switch s{dpid} đã kết nối trở lại mạng OpenFlow!"
+        return record_sdn_event(
+            req.type or "SWITCH_CHANGE",
+            "SUCCESS",
+            msg,
+            {"dpid": dpid, "port_no": req.port_no or 0, "reason": "SWITCH_UP"},
+            reason="SWITCH_UP",
+            dpid=dpid
+        )
+
+    return record_sdn_event(req.type, req.level, req.message, req.details, reason=reason, dpid=dpid)
 
 @app.get("/api/sdn/status")
 def get_status():
@@ -219,13 +388,15 @@ def get_status():
         pass
 
     all_links_up = all(l.get("status") == "UP" for l in sdn_state["links"])
+    active_sw_count = sum(1 for sw in sdn_state["switches"] if sw.get("status") == "UP")
 
     return {
         "controller": "Ryu SDN Controller (OpenFlow 1.3)",
         "platform": "Mininet Network Namespaces (Linux Server)",
         "ryu_online": ryu_online,
         "mode": "Live Mininet + Ryu Connected" if ryu_online else "Standby / Mininet Ready",
-        "switch_count": len(sdn_state["switches"]),
+        "switch_count": active_sw_count,
+        "total_switches": len(sdn_state["switches"]),
         "host_count": len(sdn_state["hosts"]),
         "firewall_rules_count": len(sdn_state["firewall_rules"]),
         "qos_meters_count": len(sdn_state["qos_meters"]),
@@ -239,6 +410,7 @@ def get_topology():
     return {
         "platform": "Mininet Topology",
         "switches": sdn_state["switches"],
+        "nodes": sdn_state["switches"],
         "hosts": sdn_state["hosts"],
         "links": sdn_state["links"]
     }
@@ -248,9 +420,10 @@ def get_events(limit: int = 50):
     sync_live_topology()
     return sdn_events[:limit]
 
+@app.post("/api/sdn/webhook/event")
 @app.post("/api/sdn/events/webhook")
 def receive_event_webhook(req: EventWebhookRequest):
-    event = record_sdn_event(req.type, req.level, req.message, req.details)
+    event = handle_switch_webhook(req)
     return {"status": "ok", "event": event}
 
 @app.delete("/api/sdn/events")
